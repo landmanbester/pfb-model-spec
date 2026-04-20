@@ -30,7 +30,7 @@ pfbspec = "pfb_model_spec.cli:app"
 [build-system]
 # NOTE: This uv_build constraint is intentionally aligned with hip-cargo's own pyproject.toml.
 # If you bump uv_build in hip-cargo, update this template constraint to match.
-requires = ["uv_build>=0.8.3,<0.11.0"]
+requires = ["uv_build>=0.8.3,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.hip-cargo]
