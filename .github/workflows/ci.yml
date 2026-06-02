@@ -108,8 +108,8 @@ jobs:
 
       - name: Install dependencies
         if: env.SKIP_CHECKS != 'true'
-        run: uv sync --group test
+        run: uv sync --extra full --group test
 
       - name: Run tests
         if: env.SKIP_CHECKS != 'true'
-        run: uv run pytest -v
+        run: uv run --extra full pytest -v
