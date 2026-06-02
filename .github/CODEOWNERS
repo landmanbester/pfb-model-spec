@@ -1,0 +1,5 @@
+# Code owners for pfb-model-spec.
+# GitHub auto-requests review from these owners on matching changes, including
+# Dependabot PRs. This replaces the deprecated `reviewers` key in dependabot.yml.
+
+* @landmanbester
