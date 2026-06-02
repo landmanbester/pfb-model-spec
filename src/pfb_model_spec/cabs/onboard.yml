@@ -1,0 +1,10 @@
+cabs:
+  onboard:
+    flavour: python
+    command: pfb_model_spec.core.onboard.onboard
+    name: onboard
+    info:
+      Print setup instructions for CI/CD, PyPI publishing, and GitHub configuration.
+    image: ghcr.io/landmanbester/pfb-model-spec:latest
+    inputs: {}
+    outputs: {}
