@@ -5,8 +5,8 @@ WORKDIR /app
 # Install uv for fast package installation
 COPY --from=ghcr.io/astral-sh/uv:0.9.8 /uv /usr/local/bin/uv
 
-# Copy package files
-COPY pyproject.toml README.md ./
+# Copy package files (LICENSE is required by pyproject's license-files glob)
+COPY pyproject.toml README.md LICENSE ./
 COPY src/ src/
 
 # Install package with full dependencies
