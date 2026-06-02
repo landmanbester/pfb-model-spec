@@ -33,6 +33,14 @@ def onboard(
     """
     if backend == "native" or backend == "auto":
         try:
+            # Pre-flight must_exist for remote URIs before dispatching.
+            from hip_cargo.utils.runner import preflight_remote_must_exist  # noqa: E402
+
+            preflight_remote_must_exist(
+                onboard,
+                dict(),
+            )
+
             # Lazy import the core implementation
             from pfb_model_spec.core.onboard import onboard as onboard_core  # noqa: E402
 
