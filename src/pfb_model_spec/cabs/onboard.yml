@@ -5,6 +5,6 @@ cabs:
     name: onboard
     info:
       Print setup instructions for CI/CD, PyPI publishing, and GitHub configuration.
-    image: ghcr.io/landmanbester/pfb-model-spec:latest
+    image: ghcr.io/landmanbester/pfb-model-spec:0.0.1
     inputs: {}
     outputs: {}
