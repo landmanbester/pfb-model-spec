@@ -28,7 +28,12 @@ dependencies = [
 #     Adds the heavy runtime deps that core/ implementations need to execute
 #     natively. Add new deps to the "full" extra below as you grow core/.
 [project.optional-dependencies]
-full = []
+full = [
+    "numpy",
+    "scipy",
+    "sympy",
+    "xarray",
+]
 
 [project.urls]
 Homepage = "https://github.com/landmanbester/pfb-model-spec"
