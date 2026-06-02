@@ -29,19 +29,20 @@ def test_modelspec_roundtrip():
     cell_deg = 2.5 / 3600.0
     nx = 256
     ny = 256
-    npix = nx
 
     # build a cube of Gaussian sources with power-law spectra
     model = np.zeros((nchan, nx, ny), dtype=np.float64)
     nsource = 25
     border = np.maximum(int(0.15 * nx), int(0.15 * ny))
-    x_index = np.random.randint(border, npix - border, nsource)
-    y_index = np.random.randint(border, npix - border, nsource)
+    x_index = np.random.randint(border, nx - border, nsource)
+    y_index = np.random.randint(border, ny - border, nsource)
     alpha = -0.7 + 0.1 * np.random.randn(nsource)
     ref_flux = 1.0 + np.exp(np.random.randn(nsource))
     extentx = np.random.randint(3, int(0.1 * nx), nsource)
     extenty = np.random.randint(3, int(0.1 * nx), nsource)
-    pas = np.random.random(nsource) * 180
+    pas = (
+        np.random.random(nsource) * 180
+    )  # nominal degrees; gaussian2d treats as radians (matches upstream test convention)
     x = -(nx / 2) + np.arange(nx)
     y = -(nx / 2) + np.arange(ny)
     xin, yin = np.meshgrid(x, y, indexing="ij")
@@ -73,6 +74,7 @@ def test_modelspec_roundtrip():
     x0 = cell_deg * xshift
     yshift = -10
     y0 = cell_deg * yshift
+    # output grid smaller than, equal to, and larger than the input grid
     for npix_out in [100, nx, 2 * nx]:
         imout = eval_coeffs_to_slice(
             mtimes[0],
