@@ -41,7 +41,7 @@ jobs:
 
       - name: Cache uv dependencies
         if: env.SKIP_CHECKS != 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
@@ -98,7 +98,7 @@ jobs:
 
       - name: Cache uv dependencies
         if: env.SKIP_CHECKS != 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-uv-py${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
