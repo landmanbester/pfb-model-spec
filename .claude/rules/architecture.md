@@ -12,15 +12,13 @@ deviate, check [hip-cargo's docs](https://github.com/landmanbester/hip-cargo) fi
 |---|---|---|
 | `cli/` | Thin Typer wrappers with `@stimela_cab` (+ optional `@stimela_output`). One file per command. Imports from `core/` are **lazy** (inside the function body). | Heavy imports at module top. Business logic. NumPy/domain libs. |
 | `core/` | The real implementation — same function name as the CLI wrapper, **no** Typer/hip-cargo decorators. Free to import anything. | Typer. `@stimela_cab`. `typer.Exit(...)`. UI concerns. |
+| `utils/` | The component-model spec library, outside the command-oriented layout: `modelspec.py` (fit + render, numpy/sympy/scipy/xarray) and `io.py` (`model_to_ds` — fit, write `.mds`, re-render; numpy/xarray/zarr). Self-contained library code, **not** CLI commands. See `component-model.md`. | Typer. `@stimela_cab`. Any dependency on `pfb_imaging`. |
 | `cabs/` | Generated `<command>.yml` files, committed to source control, loaded by Stimela. | Anything hand-written. Drift from `cli/*.py`. |
 
-Two top-level modules sit outside that command-oriented layout:
-
-- **`modelspec.py`** — the component-model spec library (fit + render). It is a self-contained
-  library module (numpy/sympy/scipy/xarray), **not** a CLI command. See `component-model.md`.
-- **`__init__.py`** — must stay light (only `__version__`). It must **not** import `modelspec`,
-  or `import pfb_model_spec` would pull the scientific stack and break the lightweight install.
-  This invariant is guarded by `tests/test_lightweight_import.py`.
+**`__init__.py`** — must stay light (only `__version__`). It must **not** import `utils.modelspec`
+(or `utils.io`, which itself imports `modelspec`), or `import pfb_model_spec` would pull the
+scientific stack and break the lightweight install. This invariant is guarded by
+`tests/test_lightweight_import.py`.
 
 ## 2. Adding a new command
 
@@ -41,7 +39,7 @@ Two top-level modules sit outside that command-oriented layout:
 | Full | `pip install pfb-model-spec[full]` | + everything in `[project.optional-dependencies].full` | local dev, native execution |
 
 When you add a heavy dep: add it to the **`full`** extra (not top-level `dependencies`), and import
-it **only from `core/`** or `modelspec.py` — never from `cli/` at module scope.
+it **only from `core/`** or `utils/` — never from `cli/` at module scope.
 
 ## 4. Container fallback & backends
 

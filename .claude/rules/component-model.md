@@ -1,7 +1,7 @@
 # The Component Model (`.mds` spec)
 
-Read this when working on `src/pfb_model_spec/modelspec.py`, the `.mds` format, or the fit/render
-routines.
+Read this when working on `src/pfb_model_spec/utils/modelspec.py`, `src/pfb_model_spec/utils/io.py`,
+the `.mds` format, or the fit/render routines.
 
 ## What it is
 
@@ -15,7 +15,7 @@ The **component model** is a compact representation of a sky model stored as an 
 
 From this, the model can be re-rendered to an image at any time, frequency, and grid resolution.
 
-## The library API (`modelspec.py`)
+## The library API (`utils/modelspec.py`)
 
 - `fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, method="poly", sigmasq=0)`
   → `(coeffs, x_index, y_index, expr, params, texpr, fexpr)` — fit the time+freq axes of a cube.
@@ -28,16 +28,28 @@ From this, the model can be re-rendered to an image at any time, frequency, and 
   bilinear resampling onto an arbitrary output grid.
 - `model_from_mds(mds_name, freqs=None)` → open an `.mds` zarr and render at original resolution.
 
+## The I/O API (`utils/io.py`)
+
+- `model_to_ds(time, freq, fsel, model, wgt, mds_name, cell_rad, nx, ny, x0, y0, flip_u, flip_v,
+  flip_w, radec, stokes, version, nbasisf=None, method="Legendre", sigmasq=1e-6)` → fits
+  `model[fsel]` via `fit_image_cube`, writes the coefficients to `mds_name` (zarr, `mode="w"`), then
+  re-renders the fit at every band in `freq` via `eval_coeffs_to_slice` and returns the resulting
+  `(nband, ny, nx)` cube. This is what pfb-imaging's `deconv.py` calls each minor cycle to persist
+  and re-evaluate the component model — geometry (`x0`/`y0`/flips) is a gridder concern
+  (`wgridder_conventions`) and is passed in rather than computed, so `io.py` has no dependency on
+  `pfb_imaging`.
+
 ## Drop-in fidelity rule (important)
 
-`modelspec.py` is a **byte-identical vendored copy** of `pfb_imaging/utils/modelspec.py`. The goal
-is for pfb-imaging to later import this module unchanged (changing only its import lines, never call
-sites). Therefore:
+`utils/modelspec.py` is a **byte-identical vendored copy** of `pfb_imaging/utils/modelspec.py`. The
+goal is for pfb-imaging to later import this module unchanged (changing only its import lines,
+never call sites). Therefore:
 
 - **Do not change public function signatures, return tuples, or the `.mds` schema** without
   coordinating with pfb-imaging.
 - Cosmetic `ruff` formatting is fine; behavioural changes are not.
 - To re-sync after an upstream change, re-copy the file verbatim rather than hand-editing.
+- `utils/io.py` is **not** vendored — it is new code owned by this repo, free to evolve.
 
 ## The `.mds` schema
 
@@ -66,4 +78,5 @@ These were intentionally left for later phases (see
 The spec library is tested with **synthetic, measurement-set-free** data (`tests/test_modelspec.py`
 + `tests/_synth.py`): a multi-Gaussian, power-law cube is fit and rendered back, asserting an exact
 round-trip and integer-pixel-shift interpolation invariance. No MS / `daskms` / `africanus` needed.
-Tests require the `full` extra (`uv run --extra full pytest`).
+`tests/test_io.py` covers `model_to_ds` the same way, additionally asserting the written `.mds`
+zarr's attrs/coords. Tests require the `full` extra (`uv run --extra full pytest`).

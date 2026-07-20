@@ -33,6 +33,7 @@ full = [
     "scipy",
     "sympy",
     "xarray",
+    "zarr",
 ]
 
 [project.urls]

@@ -16,11 +16,13 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
 
 ## Current status (phase 1)
 
-- **Implemented:** the portable spec library `pfb_model_spec/modelspec.py` (fit + render),
+- **Implemented:** the portable spec library `pfb_model_spec/utils/modelspec.py` (fit + render),
   vendored **byte-for-byte** from `pfb_imaging/utils/modelspec.py` so pfb-imaging can later
-  import it as a drop-in replacement. Synthetic, measurement-set-free tests. Release/CI tooling
-  (changelog, conventional commits, `uv`-ecosystem Dependabot, CODEOWNERS) at parity with the
-  sibling repos.
+  import it as a drop-in replacement, plus `pfb_model_spec/utils/io.py` (`model_to_ds`) which
+  fits a model cube, writes it to a `.mds`, and re-renders it — replacing the inline model-writing
+  logic that used to live in pfb-imaging's `deconv.py`. Synthetic, measurement-set-free tests.
+  Release/CI tooling (changelog, conventional commits, `uv`-ecosystem Dependabot, CODEOWNERS) at
+  parity with the sibling repos.
 - **Scaffold:** the `onboard` command (safe to delete once project setup is complete).
 - **Deferred (not yet built):** the `model2comps` CLI converter, the pfb-imaging `.dds` reading
   path, and FITS I/O. See `.claude/rules/component-model.md`.
@@ -52,11 +54,11 @@ uv run --extra full pytest -v                           # run tests (the `full` 
 
 ```
 src/pfb_model_spec/
-├── __init__.py            # stays light: only __version__ (must NOT import modelspec)
+├── __init__.py            # stays light: only __version__ (must NOT import utils/modelspec)
 ├── _container_image.py    # CONTAINER_IMAGE — single source of truth for the image tag
-├── modelspec.py           # the component-model spec library (fit + render)
 ├── cli/                   # lightweight Typer wrappers — generate-cabs parses these
 ├── core/                  # heavy implementations mirroring cli/ commands (one per command)
+├── utils/                 # modelspec.py (fit/render) + io.py (.mds write/re-render)
 └── cabs/                  # AUTO-GENERATED Stimela YAMLs — never hand-edit
 tests/                     # synthetic, MS-free tests (+ _synth.py helpers)
 ```

@@ -13,4 +13,4 @@ def test_top_level_import_does_not_load_modelspec():
 
     import pfb_model_spec  # noqa: F401
 
-    assert "pfb_model_spec.modelspec" not in sys.modules
+    assert "pfb_model_spec.utils.modelspec" not in sys.modules

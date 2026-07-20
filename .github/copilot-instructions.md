@@ -17,9 +17,11 @@ reviews**.
 - **`src/pfb_model_spec/cabs/*.yml`** are **generated artefacts**. Do not suggest hand-editing them,
   and do not flag drift between branches — they are regenerated from `cli/*.py` by a pre-commit hook,
   by `update-cabs.yml` on `main`, and by `tbump` on release.
-- **`src/pfb_model_spec/modelspec.py`** and **`tests/_synth.py`** are **byte-identical vendored
+- **`src/pfb_model_spec/utils/modelspec.py`** and **`tests/_synth.py`** are **byte-identical vendored
   copies** from pfb-imaging. Do not suggest renaming, restyling, refactoring, or "modernizing" them —
   fidelity to upstream is the explicit goal so pfb-imaging can import them as a drop-in.
+  (`src/pfb_model_spec/utils/io.py` sits alongside it but is new, non-vendored code — normal review
+  rules apply there.)
 - **`[skip checks]`** in commit messages (used only by the `update-cabs` bot) — not a mistake.
 - The **two-tier dependency split**: top-level `dependencies` stays tiny (`hip-cargo`); the
   scientific stack lives in `[project.optional-dependencies].full`. The top-level `__init__.py`
@@ -28,7 +30,7 @@ reviews**.
 
 ## DO flag / care about
 
-- Behavioural changes to `modelspec.py` public signatures, return tuples, or the `.mds` schema
+- Behavioural changes to `utils/modelspec.py` public signatures, return tuples, or the `.mds` schema
   (these break the pfb-imaging drop-in contract).
 - `cli/` modules importing heavy deps at module scope, or importing from `core/` outside the function
   body (must stay lazy).
