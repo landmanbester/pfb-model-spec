@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "hip-cargo>=0.2.0",
+    "hip-cargo>=0.2.2",
 ]
 
 # Lightweight install (default):  pip install pfb-model-spec
