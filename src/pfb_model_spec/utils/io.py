@@ -3,6 +3,14 @@
 Geometry conventions (flips, phase-centre offsets) are a pfb-imaging/gridder concern
 (`wgridder_conventions`) and are deliberately taken as arguments here rather than
 computed, so this module has no dependency on pfb-imaging.
+
+The current (`"genesis"`) `.mds` spec is **x-major**: model cubes passed in and returned
+here are `(nband, nx, ny)`-ordered, matching `location_x`/`location_y`. This is *not*
+pfb-imaging's internal `(Y, X)` raster convention -- callers on a `(Y, X)` cube must
+transpose at the call site. A future spec revision is expected to make the `.mds` format
+itself `(Y, X)`-ordered, with conversion handled by the planned `model2comps` converter
+(see https://github.com/landmanbester/pfb-model-spec/issues/17); this module will be
+updated to match when that lands.
 """
 
 import numpy as np
@@ -40,11 +48,16 @@ def model_to_ds(
     every frequency in `freq` (not just the fitted `fsel` subset) to produce a model
     cube consistent with the stored component model.
 
+    `model` (in) and the returned cube (out) both follow the current `.mds` spec's
+    x-major `(nband, nx, ny)` axis order -- see the module docstring. Callers whose
+    model cube is `(nband, ny, nx)`-ordered (e.g. pfb-imaging's internal convention)
+    must transpose to/from `(nband, nx, ny)` themselves before/after calling this.
+
     Args:
         time: Time axis, shape `(ntime,)`.
         freq: Full frequency axis, shape `(nband,)`.
         fsel: Boolean mask over `freq`/`model` selecting the bands to fit.
-        model: Model cube, shape `(nband, ny, nx)`.
+        model: Model cube, shape `(nband, nx, ny)`.
         wgt: Per-band fit weight, shape `(nband,)`; only `wgt[fsel]` is used.
         mds_name: Output `.mds` (zarr) path.
         cell_rad: Pixel size in radians (assumed square).
@@ -65,12 +78,12 @@ def model_to_ds(
 
     Returns:
         The model cube re-rendered from the fitted coefficients, shape
-        `(nband, ny, nx)`.
+        `(nband, nx, ny)`.
     """
     coeffs, x_index, y_index, expr, params, texpr, fexpr = fit_image_cube(
         time,
         freq[fsel],
-        model[None, fsel, :, :].transpose(0, 1, 3, 2),
+        model[None, fsel, :, :],
         wgt=wgt[None, fsel],
         nbasisf=nbasisf,
         method=method,
@@ -109,7 +122,7 @@ def model_to_ds(
     coeff_dataset.to_zarr(mds_name, mode="w")
 
     nband = freq.size
-    new_model = np.zeros((nband, ny, nx), dtype=model.dtype)
+    new_model = np.zeros((nband, nx, ny), dtype=model.dtype)
     for b in range(nband):
         new_model[b] = eval_coeffs_to_slice(
             time[0],
@@ -133,5 +146,5 @@ def model_to_ds(
             cell_rad,
             x0,
             y0,
-        ).T
+        )
     return new_model

@@ -15,6 +15,17 @@ The **component model** is a compact representation of a sky model stored as an 
 
 From this, the model can be re-rendered to an image at any time, frequency, and grid resolution.
 
+## Axis convention (x-major)
+
+The current (`"genesis"`) `.mds` spec is **x-major**: `location_x`/`location_y` and every model
+cube this library builds or consumes are `(nband, nx, ny)`-ordered. This is **not** pfb-imaging's
+internal `(Y, X)` raster convention — pfb-model-spec deliberately does not transpose to match it.
+Callers on a `(Y, X)` cube (e.g. pfb-imaging) must transpose to/from `(nband, nx, ny)` at their own
+call site; do not add a transpose inside this library to paper over that mismatch. A future spec
+revision is expected to flip the `.mds` format itself to `(Y, X)`, with conversion handled by the
+planned `model2comps` converter (https://github.com/landmanbester/pfb-model-spec/issues/17) — this
+doc and `utils/io.py`'s docstrings should be updated together when that lands.
+
 ## The library API (`utils/modelspec.py`)
 
 - `fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, method="poly", sigmasq=0)`
@@ -34,10 +45,10 @@ From this, the model can be re-rendered to an image at any time, frequency, and 
   flip_w, radec, stokes, version, nbasisf=None, method="Legendre", sigmasq=1e-6)` → fits
   `model[fsel]` via `fit_image_cube`, writes the coefficients to `mds_name` (zarr, `mode="w"`), then
   re-renders the fit at every band in `freq` via `eval_coeffs_to_slice` and returns the resulting
-  `(nband, ny, nx)` cube. This is what pfb-imaging's `deconv.py` calls each minor cycle to persist
-  and re-evaluate the component model — geometry (`x0`/`y0`/flips) is a gridder concern
-  (`wgridder_conventions`) and is passed in rather than computed, so `io.py` has no dependency on
-  `pfb_imaging`.
+  `(nband, nx, ny)` cube (x-major — see "Axis convention" above; no internal transpose). This is
+  what pfb-imaging's `deconv.py` calls each minor cycle to persist and re-evaluate the component
+  model — geometry (`x0`/`y0`/flips) is a gridder concern (`wgridder_conventions`) and is passed in
+  rather than computed, so `io.py` has no dependency on `pfb_imaging`.
 
 ## Drop-in fidelity rule (important)
 

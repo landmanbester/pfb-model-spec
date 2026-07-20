@@ -19,6 +19,8 @@ def test_model_to_ds_roundtrip(tmp_path):
     nx = 64
     ny = 64
 
+    # x-major (nchan, nx, ny), matching model_to_ds's .mds convention directly --
+    # no transpose needed here (that's the caller's job on a (Y, X) cube).
     model = np.zeros((nchan, nx, ny), dtype=np.float64)
     nsource = 10
     border = np.maximum(int(0.15 * nx), int(0.15 * ny))
