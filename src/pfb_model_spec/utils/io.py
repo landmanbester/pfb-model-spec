@@ -19,6 +19,90 @@ import xarray as xr
 from pfb_model_spec.utils.modelspec import eval_coeffs_to_slice, fit_image_cube
 
 
+def build_mds_dataset(
+    coeffs: np.ndarray,
+    x_index: np.ndarray,
+    y_index: np.ndarray,
+    expr: str,
+    params: list,
+    texpr: str,
+    fexpr: str,
+    time: np.ndarray,
+    freq: np.ndarray,
+    cell_rad: float,
+    nx: int,
+    ny: int,
+    x0: float,
+    y0: float,
+    flip_u: bool,
+    flip_v: bool,
+    flip_w: bool,
+    radec: tuple[float, float],
+    stokes: str,
+    version: str,
+) -> xr.Dataset:
+    """Assemble a `.mds` (``"genesis"`` spec) dataset from fitted coefficients.
+
+    Single owner of the `.mds` schema: both ``model_to_ds`` and the ``model2comps``
+    converter build their datasets through here so the coord/attr field names cannot
+    drift between the two write paths (``model_from_mds`` reads the same schema).
+
+    Args:
+        coeffs: Fitted coefficients, dims `(par, comps)`.
+        x_index: Component x pixel locations.
+        y_index: Component y pixel locations.
+        expr: Symbolic parametrisation (already stringified).
+        params: Parameter names for the coefficient axis.
+        texpr: Time scaling expression.
+        fexpr: Frequency scaling expression.
+        time: Time axis, shape `(ntime,)`.
+        freq: Frequency axis, shape `(nband,)`.
+        cell_rad: Pixel size in radians (assumed square).
+        nx: Number of pixels along x.
+        ny: Number of pixels along y.
+        x0: Phase-centre x offset (`wgridder_conventions`).
+        y0: Phase-centre y offset (`wgridder_conventions`).
+        flip_u: U-axis flip convention.
+        flip_v: V-axis flip convention.
+        flip_w: W-axis flip convention.
+        radec: `(ra, dec)` in radians.
+        stokes: Stokes/correlation product, e.g. `"I"`.
+        version: pfb-imaging/model-spec version to record in the attrs.
+
+    Returns:
+        The `.mds` ``xarray.Dataset`` (not yet written to disk).
+    """
+    return xr.Dataset(
+        data_vars={"coefficients": (("par", "comps"), coeffs)},
+        coords={
+            "location_x": (("x",), x_index),
+            "location_y": (("y",), y_index),
+            "params": (("par",), params),
+            "times": (("t",), time),
+            "freqs": (("f",), freq),
+        },
+        attrs={
+            "pfb-imaging-version": version,
+            "spec": "genesis",
+            "cell_rad_x": cell_rad,
+            "cell_rad_y": cell_rad,
+            "npix_x": nx,
+            "npix_y": ny,
+            "texpr": texpr,
+            "fexpr": fexpr,
+            "center_x": x0,
+            "center_y": y0,
+            "flip_u": flip_u,
+            "flip_v": flip_v,
+            "flip_w": flip_w,
+            "ra": radec[0],
+            "dec": radec[1],
+            "stokes": stokes,
+            "parametrisation": expr,
+        },
+    )
+
+
 def model_to_ds(
     time: np.ndarray,
     freq: np.ndarray,
@@ -90,34 +174,27 @@ def model_to_ds(
         sigmasq=sigmasq,
     )
 
-    coeff_dataset = xr.Dataset(
-        data_vars={"coefficients": (("par", "comps"), coeffs)},
-        coords={
-            "location_x": (("x",), x_index),
-            "location_y": (("y",), y_index),
-            "params": (("par",), params),
-            "times": (("t",), time),
-            "freqs": (("f",), freq),
-        },
-        attrs={
-            "pfb-imaging-version": version,
-            "spec": "genesis",
-            "cell_rad_x": cell_rad,
-            "cell_rad_y": cell_rad,
-            "npix_x": nx,
-            "npix_y": ny,
-            "texpr": texpr,
-            "fexpr": fexpr,
-            "center_x": x0,
-            "center_y": y0,
-            "flip_u": flip_u,
-            "flip_v": flip_v,
-            "flip_w": flip_w,
-            "ra": radec[0],
-            "dec": radec[1],
-            "stokes": stokes,
-            "parametrisation": expr,
-        },
+    coeff_dataset = build_mds_dataset(
+        coeffs,
+        x_index,
+        y_index,
+        expr,
+        params,
+        texpr,
+        fexpr,
+        time,
+        freq,
+        cell_rad,
+        nx,
+        ny,
+        x0,
+        y0,
+        flip_u,
+        flip_v,
+        flip_w,
+        radec,
+        stokes,
+        version,
     )
     coeff_dataset.to_zarr(mds_name, mode="w")
 

@@ -29,6 +29,7 @@ dependencies = [
 #     natively. Add new deps to the "full" extra below as you grow core/.
 [project.optional-dependencies]
 full = [
+    "astropy",
     "numpy",
     "scipy",
     "sympy",

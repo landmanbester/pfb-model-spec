@@ -16,8 +16,10 @@ def callback() -> None:
 
 
 # Register subcommands below. Imports go here (bottom) to avoid circular imports.
+from pfb_model_spec.cli.model2comps import model2comps  # noqa: E402
 from pfb_model_spec.cli.onboard import onboard  # noqa: E402
 
 app.command(name="onboard")(onboard)
+app.command(name="model2comps")(model2comps)
 
 __all__ = ["app"]

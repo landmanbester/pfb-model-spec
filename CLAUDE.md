@@ -14,18 +14,22 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
 *Detailed architecture, domain logic, Python standards, and CI/CD rules are modularized into
 `.claude/rules/` for progressive disclosure — read the relevant file when working in that area.*
 
-## Current status (phase 1)
+## Current status
 
-- **Implemented:** the portable spec library `pfb_model_spec/utils/modelspec.py` (fit + render),
-  vendored **byte-for-byte** from `pfb_imaging/utils/modelspec.py` so pfb-imaging can later
-  import it as a drop-in replacement, plus `pfb_model_spec/utils/io.py` (`model_to_ds`) which
-  fits a model cube, writes it to a `.mds`, and re-renders it — replacing the inline model-writing
-  logic that used to live in pfb-imaging's `deconv.py`. Synthetic, measurement-set-free tests.
-  Release/CI tooling (changelog, conventional commits, `uv`-ecosystem Dependabot, CODEOWNERS) at
-  parity with the sibling repos.
+- **Spec library** `pfb_model_spec/utils/modelspec.py` (fit + render), plus
+  `pfb_model_spec/utils/io.py` (`model_to_ds` — fit a model cube, write it to a `.mds`, re-render;
+  `build_mds_dataset` — the single owner of the `.mds` schema). pfb-imaging imports these directly
+  (its `deconv.py` calls `model_to_ds`), so the historical "byte-for-byte vendored copy" no longer
+  applies — pfb-model-spec is now canonical (see `component-model.md` → "Ownership").
+- **`model2comps` converter** (`cli/` + `core/model2comps.py`): the portable **WSClean FITS →
+  `.mds`** path, migrated from pfb-imaging (ratt-ru/pfb-imaging#286). Reads `*-model.fits`, fits
+  the component model, writes the `.mds`, and renders a sanity FITS via the portable FITS I/O in
+  `utils/fits.py` (`save_fits`/`set_wcs`, astropy-only). The legacy `.dds`-input path was **not**
+  migrated (dropped — daskms-coupled and no longer producible in-repo).
 - **Scaffold:** the `onboard` command (safe to delete once project setup is complete).
-- **Deferred (not yet built):** the `model2comps` CLI converter, the pfb-imaging `.dds` reading
-  path, and FITS I/O. See `.claude/rules/component-model.md`.
+- **Deferred (not yet built):** the pfb-imaging `.dds` reading path (coupled to pfb-imaging's
+  dataset format / daskms) and a shared `.mds` reader for degrid/QuartiCal (coordinate with
+  ratt-ru/pfb-imaging#278). See `.claude/rules/component-model.md`.
 
 The full design + plan live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
@@ -58,7 +62,7 @@ src/pfb_model_spec/
 ├── _container_image.py    # CONTAINER_IMAGE — single source of truth for the image tag
 ├── cli/                   # lightweight Typer wrappers — generate-cabs parses these
 ├── core/                  # heavy implementations mirroring cli/ commands (one per command)
-├── utils/                 # modelspec.py (fit/render) + io.py (.mds write/re-render)
+├── utils/                 # modelspec.py (fit/render) + io.py (.mds write/re-render) + fits.py (portable FITS I/O)
 └── cabs/                  # AUTO-GENERATED Stimela YAMLs — never hand-edit
 tests/                     # synthetic, MS-free tests (+ _synth.py helpers)
 ```

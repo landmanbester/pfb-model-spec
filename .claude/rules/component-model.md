@@ -49,18 +49,36 @@ doc and `utils/io.py`'s docstrings should be updated together when that lands.
   what pfb-imaging's `deconv.py` calls each minor cycle to persist and re-evaluate the component
   model — geometry (`x0`/`y0`/flips) is a gridder concern (`wgridder_conventions`) and is passed in
   rather than computed, so `io.py` has no dependency on `pfb_imaging`.
+- `build_mds_dataset(coeffs, x_index, y_index, expr, params, texpr, fexpr, time, freq, cell_rad,
+  nx, ny, x0, y0, flip_u, flip_v, flip_w, radec, stokes, version)` → the **single owner of the
+  `.mds` schema**: assembles the `xarray.Dataset` (data_vars/coords/attrs below) but does not write
+  it. Both `model_to_ds` and the `model2comps` converter build through here, so the two write paths
+  cannot drift from each other or from `model_from_mds`'s reader.
 
-## Drop-in fidelity rule (important)
+## The converter (`core/model2comps.py`, `utils/fits.py`)
 
-`utils/modelspec.py` is a **byte-identical vendored copy** of `pfb_imaging/utils/modelspec.py`. The
-goal is for pfb-imaging to later import this module unchanged (changing only its import lines,
-never call sites). Therefore:
+- `model2comps(output_filename, from_fits, ...)` (core) — the portable **WSClean FITS → `.mds`**
+  converter (`pfbspec model2comps`). `read_wsclean_model` reads a `{from_fits}-####-model.fits`
+  cube (astropy, deferred import), transposing each row-major `(ny, nx)` plane to the spec's x-major
+  `(nx, ny)`; the fit → `build_mds_dataset` → `to_zarr` path writes the `.mds`, and a sanity model
+  FITS is rendered via `utils/fits.py`. It has **no** `.dds`/daskms/ducc0 coupling — the legacy
+  `.dds`-input path from pfb-imaging was intentionally dropped (deconvolvers write `.mds` directly
+  via `model_to_ds`; see ratt-ru/pfb-imaging#286).
+- `utils/fits.py` (`save_fits`, `set_wcs`, `to4d`) — a minimal astropy-only FITS writer for model
+  cubes. Deliberately excludes restoring-beam parametrisation, CASA beam tables, and MS-time
+  handling (a component model has none of those). No dependency on pfb-imaging.
 
-- **Do not change public function signatures, return tuples, or the `.mds` schema** without
-  coordinating with pfb-imaging.
-- Cosmetic `ruff` formatting is fine; behavioural changes are not.
-- To re-sync after an upstream change, re-copy the file verbatim rather than hand-editing.
-- `utils/io.py` is **not** vendored — it is new code owned by this repo, free to evolve.
+## Ownership (canonical, not vendored)
+
+`utils/modelspec.py` **was** a byte-for-byte vendored copy of `pfb_imaging/utils/modelspec.py`.
+That phase is over: pfb-imaging now imports the library from this package (and deleted its own
+copy — ratt-ru/pfb-imaging#286), so **pfb-model-spec is the canonical owner**. There is no longer a
+copy to keep in sync; the "re-copy verbatim to re-sync" rule is retired.
+
+- **Public function signatures, return tuples, and the `.mds` schema are a cross-repo contract.**
+  Changing any of them is a breaking change for pfb-imaging — coordinate, and treat an axis-order
+  or schema change as a versioned spec revision (see "Axis convention", #17), never a silent edit.
+- Behavioural changes to the numerics are contract changes; cosmetic `ruff` formatting is not.
 
 ## The `.mds` schema
 
@@ -74,20 +92,20 @@ Owned by the (deferred) converter; `model_from_mds` reads it, so the field names
 
 ## Deferred scope (not yet implemented)
 
-These were intentionally left for later phases (see
-`docs/superpowers/specs/2026-06-02-modelspec-library-extraction-design.md`):
-
-- the **`model2comps` CLI converter** (pixelated image → `.mds`), including the portable
-  WSClean-style FITS input path;
 - the pfb-imaging **`.dds` reading path** (coupled to pfb-imaging's dataset format and its heavier
-  deps — `daskms`, `ducc0`);
-- **FITS I/O** (`save_fits` / `set_wcs`) and an optional `.mds` schema-guard test through
-  `model_from_mds`.
+  deps — `daskms`, `ducc0`); the `model2comps` converter migrated only the portable FITS-input path;
+- a shared **`.mds` reader** returning coefficients + symbolic expr + geometry (not just a rendered
+  cube like `model_from_mds`) for pfb-imaging's `degrid` and QuartiCal to consume instead of
+  re-implementing the `parse_expr`/`lambdify` schema read inline — coordinate with
+  ratt-ru/pfb-imaging#278.
 
 ## Testing
 
-The spec library is tested with **synthetic, measurement-set-free** data (`tests/test_modelspec.py`
-+ `tests/_synth.py`): a multi-Gaussian, power-law cube is fit and rendered back, asserting an exact
-round-trip and integer-pixel-shift interpolation invariance. No MS / `daskms` / `africanus` needed.
-`tests/test_io.py` covers `model_to_ds` the same way, additionally asserting the written `.mds`
-zarr's attrs/coords. Tests require the `full` extra (`uv run --extra full pytest`).
+The library is tested with **synthetic, measurement-set-free** data. `tests/test_modelspec.py`
+(+ `tests/_synth.py`): a multi-Gaussian, power-law cube is fit and rendered back, asserting an exact
+round-trip and integer-pixel-shift interpolation invariance. `tests/test_io.py` covers `model_to_ds`
+the same way, additionally asserting the written `.mds` zarr's attrs/coords. `tests/test_model2comps.py`
+writes a synthetic cube out as WSClean `-####-model.fits` planes, runs the converter, and asserts the
+`.mds` round-trips (exact for an `nbasisf == nband`, `sigmasq == 0` fit) plus the overwrite/no-image
+guards. No MS / `daskms` / `africanus` needed. Tests require the `full` extra
+(`uv run --extra full pytest`).

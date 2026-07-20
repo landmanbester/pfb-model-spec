@@ -1,0 +1,246 @@
+from pathlib import Path
+from typing import Annotated, Literal, NewType
+
+import typer
+from hip_cargo import StimelaMeta, parse_upath, stimela_cab, stimela_output
+
+Directory = NewType("Directory", Path)
+
+
+@stimela_cab(
+    name="model2comps",
+    info="Convert a WSClean-style FITS model cube to a component model.",
+)
+@stimela_output(
+    dtype="Directory",
+    name="mds-out",
+    info="Output component model.",
+    implicit="=IFSET(current.model-out, current.model-out, {current.output-filename}_{current.product}_{current.suffix}_{current.model-name}.mds)",  # noqa: E501
+    must_exist=False,
+)
+@stimela_output(
+    dtype="Directory",
+    name="fits-output-folder",
+    info="Optional path to write fits files to. "
+    "Set to the current directory if not provided. "
+    "The same naming conventions apply.",
+    must_exist=False,
+    mkdir=False,
+    path_policies={"write_parent": True},
+    metadata={"rich_help_panel": "Output"},
+)
+def model2comps(
+    output_filename: Annotated[
+        str,
+        typer.Option(
+            ...,
+            help="Basename of output",
+            rich_help_panel="Naming",
+        ),
+    ],
+    from_fits: Annotated[
+        str,
+        typer.Option(
+            ...,
+            help="WSClean model prefix. Reads {from-fits}-####-model.fits per band.",
+            rich_help_panel="Input",
+        ),
+    ],
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            help="Allow overwrite of existing model",
+            rich_help_panel="Control",
+        ),
+    ] = False,
+    nbasisf: Annotated[
+        int | None,
+        typer.Option(
+            help="Order of interpolating polynomial for frequency axis. One less than the number of bands by default.",
+            rich_help_panel="Fitting",
+        ),
+    ] = None,
+    fit_mode: Annotated[
+        str,
+        typer.Option(
+            help="Basis for the frequency fit.",
+            rich_help_panel="Fitting",
+        ),
+    ] = "Legendre",
+    min_val: Annotated[
+        float | None,
+        typer.Option(
+            help="Only fit components above this flux level",
+            rich_help_panel="Fitting",
+        ),
+    ] = None,
+    suffix: Annotated[
+        str,
+        typer.Option(
+            help="Can be used to specify a custom name for the image space data products. "
+            "This is useful for distinguishing runs with different imaging paramaters. "
+            "For example, different image sizes of robustness factors.",
+            rich_help_panel="Naming",
+        ),
+    ] = "main",
+    model_name: Annotated[
+        str,
+        typer.Option(
+            help="Name of model in mds",
+            rich_help_panel="Naming",
+        ),
+    ] = "MODEL",
+    use_wsum: Annotated[
+        bool,
+        typer.Option(
+            help="Use wsum as weights during fit",
+            rich_help_panel="Fitting",
+        ),
+    ] = True,
+    sigmasq: Annotated[
+        float,
+        typer.Option(
+            help="Multiple of the identity to add to the hessian for stability",
+            rich_help_panel="Fitting",
+        ),
+    ] = 1e-10,
+    model_out: Annotated[
+        str | None,
+        typer.Option(
+            help="Optional explicit output name. Otherwise the default naming convention is used.",
+            rich_help_panel="Output",
+        ),
+    ] = None,
+    out_freqs: Annotated[
+        str | None,
+        typer.Option(
+            help="A string flow:fhigh:step of frequencies in hertz where the output cube needs to be evaluated.",
+            rich_help_panel="Output",
+        ),
+    ] = None,
+    product: Annotated[
+        str,
+        typer.Option(
+            help="String specifying which Stokes products to produce. Outputs are always be alphabetically ordered.",
+            rich_help_panel="Data Selection",
+        ),
+    ] = "I",
+    fits_output_folder: Annotated[
+        Directory | None,
+        typer.Option(
+            parser=parse_upath,
+            help="Optional path to write fits files to. "
+            "Set to the current directory if not provided. "
+            "The same naming conventions apply.",
+            rich_help_panel="Output",
+        ),
+        StimelaMeta(
+            must_exist=False,
+            mkdir=False,
+            path_policies={
+                "write_parent": True,
+            },
+        ),
+    ] = None,
+    backend: Annotated[
+        Literal["auto", "native", "apptainer", "singularity", "docker", "podman"],
+        typer.Option(
+            help="Execution backend.",
+        ),
+        StimelaMeta(
+            skip=True,
+        ),
+    ] = "auto",
+    always_pull_images: Annotated[
+        bool,
+        typer.Option(
+            help="Always pull container images, even if cached locally.",
+        ),
+        StimelaMeta(
+            skip=True,
+        ),
+    ] = False,
+):
+    """
+    Convert a WSClean-style FITS model cube to a component model.
+    """
+    if backend == "native" or backend == "auto":
+        try:
+            # Pre-flight must_exist for remote URIs before dispatching.
+            from hip_cargo.utils.runner import preflight_remote_must_exist  # noqa: E402
+
+            preflight_remote_must_exist(
+                model2comps,
+                dict(
+                    output_filename=output_filename,
+                    from_fits=from_fits,
+                    overwrite=overwrite,
+                    nbasisf=nbasisf,
+                    fit_mode=fit_mode,
+                    min_val=min_val,
+                    suffix=suffix,
+                    model_name=model_name,
+                    use_wsum=use_wsum,
+                    sigmasq=sigmasq,
+                    model_out=model_out,
+                    out_freqs=out_freqs,
+                    product=product,
+                    fits_output_folder=fits_output_folder,
+                ),
+            )
+
+            # Lazy import the core implementation
+            from pfb_model_spec.core.model2comps import model2comps as model2comps_core  # noqa: E402
+
+            # Call the core function with all parameters
+            model2comps_core(
+                output_filename,
+                from_fits,
+                overwrite=overwrite,
+                nbasisf=nbasisf,
+                fit_mode=fit_mode,
+                min_val=min_val,
+                suffix=suffix,
+                model_name=model_name,
+                use_wsum=use_wsum,
+                sigmasq=sigmasq,
+                model_out=model_out,
+                out_freqs=out_freqs,
+                product=product,
+                fits_output_folder=fits_output_folder,
+            )
+            return
+        except ImportError:
+            if backend == "native":
+                raise
+
+    # Resolve container image from installed package metadata
+    from hip_cargo.utils.config import get_container_image  # noqa: E402
+    from hip_cargo.utils.runner import run_in_container  # noqa: E402
+
+    image = get_container_image("pfb-model-spec")
+    if image is None:
+        raise RuntimeError("No Container URL in pfb-model-spec metadata.")
+
+    run_in_container(
+        model2comps,
+        dict(
+            output_filename=output_filename,
+            from_fits=from_fits,
+            overwrite=overwrite,
+            nbasisf=nbasisf,
+            fit_mode=fit_mode,
+            min_val=min_val,
+            suffix=suffix,
+            model_name=model_name,
+            use_wsum=use_wsum,
+            sigmasq=sigmasq,
+            model_out=model_out,
+            out_freqs=out_freqs,
+            product=product,
+            fits_output_folder=fits_output_folder,
+        ),
+        image=image,
+        backend=backend,
+        always_pull_images=always_pull_images,
+    )
