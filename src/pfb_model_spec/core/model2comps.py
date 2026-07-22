@@ -243,7 +243,7 @@ def model2comps(
     hdr = set_wcs(cell_deg, cell_deg, nx, ny, radec, freq_out, unit="Jy/pixel")
     os.makedirs(fits_dir, exist_ok=True)
     log.info(f"Writing rendered model to {fits_name}")
-    save_fits(modelo[:, None, :, :], fits_name, hdr, overwrite=True)
+    save_fits(modelo[:, None, :, :], fits_name, hdr, overwrite=overwrite)
 
 
 def _render(coeffs, x_index, y_index, expr, params, texpr, fexpr, t, f, nx, ny, cell_rad, x0, y0):
