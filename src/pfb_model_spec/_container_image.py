@@ -1,1 +1,1 @@
-CONTAINER_IMAGE = "ghcr.io/landmanbester/pfb-model-spec:v002"
+CONTAINER_IMAGE = "ghcr.io/landmanbester/pfb-model-spec:latest"

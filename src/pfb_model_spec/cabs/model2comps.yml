@@ -5,7 +5,7 @@ cabs:
     name: model2comps
     info:
       Convert a WSClean-style FITS model cube to a component model.
-    image: ghcr.io/landmanbester/pfb-model-spec:v002
+    image: ghcr.io/landmanbester/pfb-model-spec:latest
     inputs:
       output-filename:
         info:
