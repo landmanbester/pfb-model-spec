@@ -17,11 +17,12 @@ reviews**.
 - **`src/pfb_model_spec/cabs/*.yml`** are **generated artefacts**. Do not suggest hand-editing them,
   and do not flag drift between branches — they are regenerated from `cli/*.py` by a pre-commit hook,
   by `update-cabs.yml` on `main`, and by `tbump` on release.
-- **`src/pfb_model_spec/utils/modelspec.py`** and **`tests/_synth.py`** are **byte-identical vendored
-  copies** from pfb-imaging. Do not suggest renaming, restyling, refactoring, or "modernizing" them —
-  fidelity to upstream is the explicit goal so pfb-imaging can import them as a drop-in.
-  (`src/pfb_model_spec/utils/io.py` sits alongside it but is new, non-vendored code — normal review
-  rules apply there.)
+- **`src/pfb_model_spec/utils/modelspec.py`** is the **canonical** spec library — pfb-imaging imports
+  it from here, so it is no longer a vendored copy *of* pfb-imaging (`tests/_synth.py` likewise
+  originated upstream). Do not suggest renaming, restyling, refactoring, or "modernizing" them: the
+  public signatures, return tuples, and `.mds` schema are a **cross-repo contract** with pfb-imaging,
+  so cosmetic churn risks silent behavioural drift. (`src/pfb_model_spec/utils/io.py` and
+  `utils/fits.py` are newer, non-vendored code — normal review rules apply there.)
 - **`[skip checks]`** in commit messages (used only by the `update-cabs` bot) — not a mistake.
 - The **two-tier dependency split**: top-level `dependencies` stays tiny (`hip-cargo`); the
   scientific stack lives in `[project.optional-dependencies].full`. The top-level `__init__.py`
@@ -31,7 +32,7 @@ reviews**.
 ## DO flag / care about
 
 - Behavioural changes to `utils/modelspec.py` public signatures, return tuples, or the `.mds` schema
-  (these break the pfb-imaging drop-in contract).
+  (these break the cross-repo contract with pfb-imaging).
 - `cli/` modules importing heavy deps at module scope, or importing from `core/` outside the function
   body (must stay lazy).
 - Non-Conventional-Commit messages (types: `feat fix refactor perf docs deps chore ci style test

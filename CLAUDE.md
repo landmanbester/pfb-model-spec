@@ -26,7 +26,6 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
   the component model, writes the `.mds`, and renders a sanity FITS via the portable FITS I/O in
   `utils/fits.py` (`save_fits`/`set_wcs`, astropy-only). The legacy `.dds`-input path was **not**
   migrated (dropped — daskms-coupled and no longer producible in-repo).
-- **Scaffold:** the `onboard` command (safe to delete once project setup is complete).
 - **Deferred (not yet built):** the pfb-imaging `.dds` reading path (coupled to pfb-imaging's
   dataset format / daskms) and a shared `.mds` reader for degrid/QuartiCal (coordinate with
   ratt-ru/pfb-imaging#278). See `.claude/rules/component-model.md`.

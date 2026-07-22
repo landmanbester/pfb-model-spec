@@ -25,7 +25,7 @@ scientific stack and break the lightweight install. This invariant is guarded by
 1. `src/pfb_model_spec/cli/<name>.py` — a `@stimela_cab`-decorated Typer function; lazily import
    the core implementation inside the body.
 2. `src/pfb_model_spec/core/<name>.py` — the real implementation, same function name, no decorators.
-3. Register it in `src/pfb_model_spec/cli/__init__.py` (mirror the `onboard` registration).
+3. Register it in `src/pfb_model_spec/cli/__init__.py` (mirror the `model2comps` registration).
 4. Add a round-trip case to `tests/test_roundtrip.py`.
 5. Commit — the pre-commit hook regenerates `cabs/<name>.yml`.
 

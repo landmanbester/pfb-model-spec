@@ -23,7 +23,7 @@ release.
   ```
   Why: the `generate-cabs` pre-commit hook uses `language: system`, so it runs whatever `hip-cargo`
   is on `PATH`. If the wrong venv is active (e.g. a sibling project's), `get_container_image` can't
-  resolve and the hook **silently strips the `image:` line** from `cabs/onboard.yml`, failing the
+  resolve and the hook **silently strips the `image:` line** from `cabs/model2comps.yml`, failing the
   commit. `uv run …` is not enough for commits because the git hook runs in the ambient shell.
 - **Commit messages must be Conventional Commits.** A `commit-msg` hook (`conventional-pre-commit`)
   enforces it. Allowed types: `feat fix refactor perf docs deps chore ci style test build`.

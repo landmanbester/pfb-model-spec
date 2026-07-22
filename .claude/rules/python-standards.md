@@ -35,7 +35,9 @@ Read this when editing or creating `**/*.py`.
 - Google-style docstrings; document Args/Returns/Raises. Keep them concise.
 - Comment only where intent isn't obvious; prefer short inline comments.
 
-## 6. Vendored code
-`utils/modelspec.py` (and the `tests/_synth.py` helpers) are vendored from pfb-imaging. Do **not**
-restyle or "improve" them — keep them faithful to upstream so the module remains a drop-in. See
-`component-model.md`.
+## 6. Canonical spec library
+`utils/modelspec.py` is the **canonical** spec library — pfb-imaging now imports it from here rather
+than the other way around, so it is no longer a vendored copy *of* pfb-imaging (`tests/_synth.py`
+likewise originated upstream). Do **not** restyle or "improve" them: the public signatures, return
+tuples, and `.mds` schema are a cross-repo contract, so cosmetic churn risks silent behavioural
+drift. See `component-model.md` → "Ownership".
