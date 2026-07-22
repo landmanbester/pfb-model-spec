@@ -911,7 +911,7 @@ wheels = [
 
 [[package]]
 name = "pfb-model-spec"
-version = "0.0.1"
+version = "0.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "hip-cargo" },
