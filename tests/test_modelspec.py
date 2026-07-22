@@ -8,7 +8,7 @@ synthetic values, so no MS download or daskms/africanus is needed.
 import numpy as np
 from numpy.testing import assert_allclose
 
-from pfb_model_spec.modelspec import (
+from pfb_model_spec.utils.modelspec import (
     eval_coeffs_to_cube,
     eval_coeffs_to_slice,
     fit_image_cube,

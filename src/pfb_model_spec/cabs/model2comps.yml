@@ -1,0 +1,119 @@
+cabs:
+  model2comps:
+    flavour: python
+    command: pfb_model_spec.core.model2comps.model2comps
+    name: model2comps
+    info:
+      Convert a WSClean-style FITS model cube to a component model.
+    image: ghcr.io/landmanbester/pfb-model-spec:v002
+    inputs:
+      output-filename:
+        info:
+          Basename of output
+        required: true
+        policies:
+          positional: true
+        metadata:
+          rich_help_panel: Naming
+      from-fits:
+        info:
+          WSClean model prefix.
+          Reads {from-fits}-####-model.fits per band.
+        required: true
+        policies:
+          positional: true
+        metadata:
+          rich_help_panel: Input
+      overwrite:
+        info:
+          Allow overwrite of existing model
+        dtype: bool
+        default: false
+        metadata:
+          rich_help_panel: Control
+      nbasisf:
+        info:
+          Order of interpolating polynomial for frequency axis.
+          One less than the number of bands by default.
+        dtype: Optional[int]
+        metadata:
+          rich_help_panel: Fitting
+      fit-mode:
+        info:
+          Basis for the frequency fit.
+        default: Legendre
+        metadata:
+          rich_help_panel: Fitting
+      min-val:
+        info:
+          Only fit components above this flux level
+        dtype: Optional[float]
+        metadata:
+          rich_help_panel: Fitting
+      suffix:
+        info:
+          Can be used to specify a custom name for the image space data products.
+          This is useful for distinguishing runs with different imaging paramaters.
+          For example, different image sizes of robustness factors.
+        default: main
+        metadata:
+          rich_help_panel: Naming
+      model-name:
+        info:
+          Name of model in mds
+        default: MODEL
+        metadata:
+          rich_help_panel: Naming
+      use-wsum:
+        info:
+          Use wsum as weights during fit
+        dtype: bool
+        default: true
+        metadata:
+          rich_help_panel: Fitting
+      sigmasq:
+        info:
+          Multiple of the identity to add to the hessian for stability
+        dtype: float
+        default: 1.0e-10
+        metadata:
+          rich_help_panel: Fitting
+      model-out:
+        info:
+          Optional explicit output name.
+          Otherwise the default naming convention is used.
+        dtype: Optional[str]
+        metadata:
+          rich_help_panel: Output
+      out-freqs:
+        info:
+          A string flow:fhigh:step of frequencies in hertz where the output cube needs to be evaluated.
+        dtype: Optional[str]
+        metadata:
+          rich_help_panel: Output
+      product:
+        info:
+          String specifying which Stokes products to produce.
+          Outputs are always be alphabetically ordered.
+        default: I
+        metadata:
+          rich_help_panel: Data Selection
+    outputs:
+      mds-out:
+        dtype: Directory
+        info:
+          Output component model.
+        implicit: '=IFSET(current.model-out, current.model-out, {current.output-filename}_{current.product}_{current.suffix}_{current.model-name}.mds)'  # noqa: E501
+        must_exist: false
+      fits-output-folder:
+        dtype: Directory
+        info:
+          Optional path to write fits files to.
+          Set to the current directory if not provided.
+          The same naming conventions apply.
+        must_exist: false
+        mkdir: false
+        path_policies:
+          write_parent: true
+        metadata:
+          rich_help_panel: Output

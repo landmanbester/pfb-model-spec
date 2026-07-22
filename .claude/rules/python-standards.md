@@ -17,8 +17,8 @@ Read this when editing or creating `**/*.py`.
 ## 3. Imports
 - **`cli/` modules stay lightweight:** import `core/` (and any heavy dep) **lazily**, inside the
   function body. This keeps `pfb --help` and cab generation fast and the lightweight install viable.
-- **`core/` and `modelspec.py`** may import heavy deps at module top.
-- **`src/pfb_model_spec/__init__.py` must not import `modelspec`** (or any heavy dep) — the
+- **`core/` and `utils/` (`modelspec.py`, `io.py`)** may import heavy deps at module top.
+- **`src/pfb_model_spec/__init__.py` must not import `utils.modelspec`** (or any heavy dep) — the
   lightweight-import guard test enforces this.
 - Comma-separated list options use `ListInt`/`ListFloat`/`ListStr` from `hip_cargo` with their
   `parse_list_*` parsers. Path types `File`/`Directory`/`MS`/`URI` use `parser=parse_upath`.
@@ -35,7 +35,9 @@ Read this when editing or creating `**/*.py`.
 - Google-style docstrings; document Args/Returns/Raises. Keep them concise.
 - Comment only where intent isn't obvious; prefer short inline comments.
 
-## 6. Vendored code
-`modelspec.py` (and the `tests/_synth.py` helpers) are vendored from pfb-imaging. Do **not**
-restyle or "improve" them — keep them faithful to upstream so the modules remain a drop-in. See
-`component-model.md`.
+## 6. Canonical spec library
+`utils/modelspec.py` is the **canonical** spec library — pfb-imaging now imports it from here rather
+than the other way around, so it is no longer a vendored copy *of* pfb-imaging (`tests/_synth.py`
+likewise originated upstream). Do **not** restyle or "improve" them: the public signatures, return
+tuples, and `.mds` schema are a cross-repo contract, so cosmetic churn risks silent behavioural
+drift. See `component-model.md` → "Ownership".
