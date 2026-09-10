@@ -5,6 +5,7 @@ import pytest
 from numpy.testing import assert_allclose
 
 from pfb_model_spec.utils.degrid import (
+    apply_mueller,
     degrid_stokes,
     model_geometry,
     render_model_region,
@@ -246,3 +247,51 @@ def test_render_model_region_rejects_unknown_spec():
     ds.attrs["spec"] = "some-future-spec"
     with pytest.raises(ValueError, match="some-future-spec"):
         render_model_region(ds, time=time[0], freq=freq[0])
+
+
+def _mueller(nso, nsi, nx, ny):
+    m = np.zeros((nso, nsi, nx, ny))
+    for i in range(min(nso, nsi)):
+        m[i, i] = 1.0
+    return m
+
+
+def test_apply_mueller_identity_is_a_no_op():
+    rng = np.random.default_rng(20)
+    img = rng.normal(size=(4, 8, 6))
+    out = apply_mueller(img, _mueller(4, 4, 8, 6))
+    assert_allclose(out, img)
+
+
+def test_apply_mueller_diagonal_scales_each_plane():
+    rng = np.random.default_rng(21)
+    img = rng.normal(size=(2, 8, 6))
+    m = _mueller(2, 2, 8, 6)
+    m[0, 0] *= 0.5
+    m[1, 1] *= 3.0
+    out = apply_mueller(img, m)
+    assert_allclose(out[0], 0.5 * img[0])
+    assert_allclose(out[1], 3.0 * img[1])
+
+
+def test_apply_mueller_predicts_leakage_from_stokes_i():
+    """The first Mueller column turns an I-only sky into apparent I, Q, U, V."""
+    rng = np.random.default_rng(22)
+    img = rng.normal(size=(1, 8, 6))
+    m = rng.normal(size=(4, 1, 8, 6))
+    out = apply_mueller(img, m)
+    assert out.shape == (4, 8, 6)
+    for i in range(4):
+        assert_allclose(out[i], m[i, 0] * img[0])
+
+
+def test_apply_mueller_rejects_shape_mismatch():
+    img = np.zeros((2, 8, 6))
+    with pytest.raises(ValueError, match="does not match"):
+        apply_mueller(img, _mueller(4, 3, 8, 6))
+
+
+def test_apply_mueller_rejects_grid_mismatch():
+    img = np.zeros((1, 8, 6))
+    with pytest.raises(ValueError, match="grid"):
+        apply_mueller(img, _mueller(1, 1, 8, 7))

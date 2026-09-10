@@ -284,3 +284,35 @@ def render_model_region(
     )
     # leading stokes axis: 1 for genesis, which stores a single product
     return image[None]
+
+
+def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
+    """Attenuate a Stokes image with a Stokes-basis Mueller beam.
+
+    ``apparent[i] = sum_j mueller[i, j] * intrinsic[j]``, pixel by pixel.
+
+    The beam is whatever the caller supplies; this function neither builds one
+    nor folds the wgridder's geometric ``1/n`` term into it. A caller that
+    folds ``1/n`` into its beam (as pfb-imaging does) must correspondingly
+    leave ``divide_by_n=False`` in :func:`degrid_stokes`.
+
+    Args:
+        stokes_image: Intrinsic model, shape ``(nstokes_in, nx, ny)``.
+        mueller: Real Mueller block, shape ``(nstokes_out, nstokes_in, nx, ny)``
+            on the same grid as ``stokes_image``.
+
+    Returns:
+        The apparent model, shape ``(nstokes_out, nx, ny)``.
+
+    Raises:
+        ValueError: If the Stokes axes or the image grids disagree.
+    """
+    if mueller.ndim != 4:
+        raise ValueError(f"mueller must be 4-D (nso, nsi, nx, ny), got {mueller.shape}")
+    if mueller.shape[1] != stokes_image.shape[0]:
+        raise ValueError(
+            f"mueller input axis {mueller.shape[1]} does not match the model's {stokes_image.shape[0]} Stokes planes"
+        )
+    if mueller.shape[2:] != stokes_image.shape[1:]:
+        raise ValueError(f"mueller grid {mueller.shape[2:]} does not match the model grid {stokes_image.shape[1:]}")
+    return np.einsum("ijxy,jxy->ixy", mueller, stokes_image)
