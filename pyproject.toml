@@ -55,6 +55,12 @@ build-backend = "uv_build"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+# "*.md": ruff 0.16+ formats Python code blocks embedded in Markdown. This repo
+# commits its design specs and implementation plans (CLAUDE.md points at
+# docs/superpowers/), and their snippets are illustrative fragments rather than
+# runnable modules -- ruff would rewrite them into standalone-valid but misleading
+# code. Keep the formatter to real Python files. Matches ratt-ru/pfb-imaging.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
