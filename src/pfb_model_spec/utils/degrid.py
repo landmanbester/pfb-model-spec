@@ -368,6 +368,14 @@ def model_to_apparent_vis_for_region(
 
     Returns:
         Complex visibilities, shape ``(nrow, nchan, len(corr_types))``.
+
+    Raises:
+        ValueError: If ``region_mask``'s grid does not match the model grid, or
+            if the composed primitives raise ValueError: non-square pixels from
+            :func:`model_geometry`, an unsupported ``.mds`` spec from
+            :func:`render_model_region`, a Mueller shape mismatch from
+            :func:`apply_mueller`, or an unsupported correlation from
+            :func:`stokes_vis_to_corr`.
     """
     geom = model_geometry(model_ds)
     image = render_model_region(model_ds, time=time, freq=freq_out)
