@@ -65,9 +65,9 @@ distribution and the MS write belong to the calling application (pfb-imaging's
 - `model_geometry(model_ds)` → the `.mds` gridding attrs as a dict (`nx`, `ny`, `cell_rad`,
   `x0`, `y0`, `flip_u/v/w`, `stokes`). Callers pass these to `degrid_stokes` rather than
   reading attrs by hand; raises on non-square pixels.
-- `render_model_region(model_ds, *, time, freq, nx=…, ny=…, cell_rad=…, x0=…, y0=…)` →
+- `render_model_region(model_ds, *, time, freq_out, nx=…, ny=…, cell_rad=…, x0=…, y0=…)` →
   `(nstokes, nx, ny)`. Wraps `eval_coeffs_to_slice`; the output grid defaults to the model's
-  own. `freq` may lie between fitted bands — that continuity is what lets a consumer predict
+  own. `freq_out` may lie between fitted bands — that continuity is what lets a consumer predict
   at finer spectral resolution than the imaging run used.
 - `apply_mueller(stokes_image, mueller)` → `(nstokes_out, nx, ny)`. Pixelwise
   `apparent[i] = Σ_j mueller[i,j]·intrinsic[j]`. Never builds a beam and never folds the
