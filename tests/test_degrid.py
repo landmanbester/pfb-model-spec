@@ -8,6 +8,7 @@ from pfb_model_spec.utils.degrid import (
     apply_mueller,
     degrid_stokes,
     model_geometry,
+    model_to_apparent_vis_for_region,
     render_model_region,
     stokes_vis_to_corr,
 )
@@ -295,3 +296,64 @@ def test_apply_mueller_rejects_grid_mismatch():
     img = np.zeros((1, 8, 6))
     with pytest.raises(ValueError, match="grid"):
         apply_mueller(img, _mueller(1, 1, 8, 7))
+
+
+def test_fused_wrapper_equals_the_composition():
+    ds, _, time, freq, cell = _synthetic_mds()
+    rng = np.random.default_rng(30)
+    uvw, chan = _uvw_freq(rng, nrow=400, nchan=3)
+    corr = ("XX", "XY", "YX", "YY")
+
+    fused = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
+
+    geom = model_geometry(ds)
+    img = render_model_region(ds, time=time[0], freq=freq[0])
+    sv = degrid_stokes(
+        uvw,
+        chan,
+        img,
+        cell_rad=geom["cell_rad"],
+        x0=geom["x0"],
+        y0=geom["y0"],
+        flip_u=geom["flip_u"],
+        flip_v=geom["flip_v"],
+        flip_w=geom["flip_w"],
+    )
+    manual = stokes_vis_to_corr(sv, geom["stokes"], corr)
+
+    assert fused.shape == (uvw.shape[0], chan.size, 4)
+    assert_allclose(fused, manual)
+
+
+def test_fused_wrapper_region_mask_selects_components():
+    """Masking splits the model: the parts must sum back to the whole."""
+    ds, _, time, freq, _ = _synthetic_mds()
+    rng = np.random.default_rng(31)
+    uvw, chan = _uvw_freq(rng, nrow=300, nchan=2)
+    corr = ("XX", "YY")
+    nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
+
+    inside = np.zeros((nx, ny))
+    inside[20, 31] = 1.0  # the first component only
+    outside = 1.0 - inside
+
+    kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
+    whole = model_to_apparent_vis_for_region(ds, **kw)
+    part_a = model_to_apparent_vis_for_region(ds, region_mask=inside, **kw)
+    part_b = model_to_apparent_vis_for_region(ds, region_mask=outside, **kw)
+
+    assert_allclose(part_a + part_b, whole, atol=1e-10)
+    assert np.abs(part_a).max() > 0.0
+    assert np.abs(part_b).max() > 0.0
+
+
+def test_fused_wrapper_identity_mueller_matches_no_beam():
+    ds, _, time, freq, _ = _synthetic_mds()
+    rng = np.random.default_rng(32)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
+    corr = ("XX", "YY")
+    nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
+    kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
+    no_beam = model_to_apparent_vis_for_region(ds, **kw)
+    with_beam = model_to_apparent_vis_for_region(ds, mueller=_mueller(1, 1, nx, ny), **kw)
+    assert_allclose(with_beam, no_beam, atol=1e-10)

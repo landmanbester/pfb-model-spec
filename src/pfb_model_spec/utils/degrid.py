@@ -316,3 +316,88 @@ def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
     if mueller.shape[2:] != stokes_image.shape[1:]:
         raise ValueError(f"mueller grid {mueller.shape[2:]} does not match the model grid {stokes_image.shape[1:]}")
     return np.einsum("ijxy,jxy->ixy", mueller, stokes_image)
+
+
+def model_to_apparent_vis_for_region(
+    model_ds: xr.Dataset,
+    *,
+    uvw: np.ndarray,
+    freq: np.ndarray,
+    corr_types: Sequence[str],
+    time: float,
+    freq_out: float,
+    mueller: np.ndarray | None = None,
+    mask: np.ndarray | None = None,
+    region_mask: np.ndarray | None = None,
+    epsilon: float = 1e-7,
+    do_wgridding: bool = True,
+    divide_by_n: bool = False,
+    nthreads: int = 1,
+) -> np.ndarray:
+    """Render a model and degrid it to apparent correlated visibilities.
+
+    Composes :func:`render_model_region`, :func:`apply_mueller`,
+    :func:`degrid_stokes` and :func:`stokes_vis_to_corr` for one chunk of data.
+    The primitives remain separately callable for consumers that need only part
+    of the chain.
+
+    The model is always rendered on its own grid, taken from the `.mds` attrs,
+    so no resampling occurs (see :func:`render_model_region` on why resampling
+    to a coarser grid would not conserve flux).
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+        uvw: Baseline coordinates in metres, shape ``(nrow, 3)``.
+        freq: Channel frequencies in Hz, shape ``(nchan,)``.
+        corr_types: Output correlations, e.g. ``("XX", "XY", "YX", "YY")``.
+        time: Representative time for the chunk, conventionally the unweighted
+            mean of its time axis.
+        freq_out: Representative frequency in Hz for the chunk, conventionally
+            the unweighted mean of its frequency axis. May lie between the
+            bands the model was fitted at.
+        mueller: Optional Stokes-basis Mueller block on the model grid, shape
+            ``(nstokes_out, nstokes_in, nx, ny)``.
+        mask: Optional ``(nrow, nchan)`` visibility mask; zero entries are not
+            degridded and come back as exactly zero.
+        region_mask: Optional ``(nx, ny)`` image mask applied to the rendered
+            model, for degridding a sub-region into its own column.
+        epsilon: Gridder accuracy.
+        do_wgridding: Perform w-correction via improved w-stacking.
+        divide_by_n: Divide by the geometric n-term; see :func:`apply_mueller`.
+        nthreads: Threads for the gridder.
+
+    Returns:
+        Complex visibilities, shape ``(nrow, nchan, len(corr_types))``.
+    """
+    geom = model_geometry(model_ds)
+    image = render_model_region(model_ds, time=time, freq=freq_out)
+    stokes_in = geom["stokes"]
+
+    if region_mask is not None:
+        if region_mask.shape != image.shape[1:]:
+            raise ValueError(f"region_mask grid {region_mask.shape} does not match the model grid {image.shape[1:]}")
+        image = image * region_mask[None]
+
+    if mueller is not None:
+        image = apply_mueller(image, mueller)
+        # a Mueller may map a single intrinsic Stokes product onto several
+        # apparent ones, so the labels follow its output axis, not the model's
+        stokes_in = "IQUV"[: image.shape[0]]
+
+    stokes_vis = degrid_stokes(
+        uvw,
+        freq,
+        image,
+        cell_rad=geom["cell_rad"],
+        x0=geom["x0"],
+        y0=geom["y0"],
+        flip_u=geom["flip_u"],
+        flip_v=geom["flip_v"],
+        flip_w=geom["flip_w"],
+        epsilon=epsilon,
+        do_wgridding=do_wgridding,
+        divide_by_n=divide_by_n,
+        nthreads=nthreads,
+        mask=mask,
+    )
+    return stokes_vis_to_corr(stokes_vis, stokes_in, corr_types)
