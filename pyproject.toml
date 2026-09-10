@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 full = [
     "astropy",
+    "ducc0",
     "numpy",
     "scipy",
     "sympy",
