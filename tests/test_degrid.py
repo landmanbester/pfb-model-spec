@@ -211,7 +211,7 @@ def _synthetic_mds(nx=64, ny=48, nband=4):
 def test_render_model_region_matches_the_fitted_cube():
     ds, cube, time, freq, _ = _synthetic_mds()
     for band in (0, freq.size - 1):
-        got = render_model_region(ds, time=time[0], freq=freq[band])
+        got = render_model_region(ds, time=time[0], freq_out=freq[band])
         assert got.shape == (1, ds.attrs["npix_x"], ds.attrs["npix_y"])
         assert_allclose(got[0], cube[band], atol=1e-10)
 
@@ -220,7 +220,7 @@ def test_render_model_region_interpolates_between_fitted_bands():
     """The model is continuous in frequency -- this is what upsampling relies on."""
     ds, cube, time, freq, _ = _synthetic_mds()
     mid = 0.5 * (freq[0] + freq[1])
-    got = render_model_region(ds, time=time[0], freq=mid)[0]
+    got = render_model_region(ds, time=time[0], freq_out=mid)[0]
     lo, hi = cube[0, 20, 31], cube[1, 20, 31]
     assert min(lo, hi) < got[20, 31] < max(lo, hi)
 
@@ -247,7 +247,80 @@ def test_render_model_region_rejects_unknown_spec():
     ds, _, time, freq, _ = _synthetic_mds()
     ds.attrs["spec"] = "some-future-spec"
     with pytest.raises(ValueError, match="some-future-spec"):
-        render_model_region(ds, time=time[0], freq=freq[0])
+        render_model_region(ds, time=time[0], freq_out=freq[0])
+
+
+def test_render_model_region_refine_conserves_flux():
+    """Refining the grid (finer cell, more pixels) is exact -- see the module
+    docstring's Note. This exercises the non-default-grid path, previously
+    untested."""
+    ds, time, freq, cell = _single_component_mds()
+    nxi, nyi = ds.attrs["npix_x"], ds.attrs["npix_y"]
+    got = render_model_region(
+        ds,
+        time=time[0],
+        freq_out=freq[0],
+        nx=2 * nxi,
+        ny=2 * nyi,
+        cell_rad=cell / 2,
+    )
+    assert got.sum() == pytest.approx(1.0, abs=1e-8)
+
+
+def test_render_model_region_coarsen_inflates_flux_by_area_ratio():
+    """Pins the documented `eval_coeffs_to_slice` limitation (module
+    docstring's Note): coarsening is NOT flux-conserving, it inflates by
+    `area_ratio` (here x4 for a x2 coarsening). This is a known limitation
+    being pinned, not desired behaviour -- do not read this as an assertion
+    that the inflation is correct."""
+    ds, time, freq, cell = _single_component_mds()
+    nxi, nyi = ds.attrs["npix_x"], ds.attrs["npix_y"]
+    got = render_model_region(
+        ds,
+        time=time[0],
+        freq_out=freq[0],
+        nx=nxi // 2,
+        ny=nyi // 2,
+        cell_rad=cell * 2,
+    )
+    assert got.sum() == pytest.approx(4.0, rel=1e-6)
+
+
+def _single_component_mds(nx=64, ny=48):
+    """A single unit-flux, flat-spectrum component -- for pinning
+    `eval_coeffs_to_slice`'s resampling scaling in isolation from any
+    interaction between multiple components."""
+    freq = np.linspace(1.0e9, 1.2e9, 2)
+    time = np.array([0.0])
+    cell = np.deg2rad(2.0 / 3600.0)
+    cube = np.zeros((2, nx, ny))
+    cube[:, nx // 2, ny // 2] = 1.0
+    coeffs, xi, yi, expr, params, texpr, fexpr = fit_image_cube(
+        time, freq, cube[None], nbasisf=2, method="Legendre", sigmasq=0
+    )
+    ds = build_mds_dataset(
+        coeffs,
+        xi,
+        yi,
+        expr,
+        params,
+        texpr,
+        fexpr,
+        time,
+        freq,
+        cell,
+        nx,
+        ny,
+        0.0,
+        0.0,
+        False,
+        True,
+        False,
+        (0.1, -0.5),
+        "I",
+        "test",
+    )
+    return ds, time, freq, cell
 
 
 def _mueller(nso, nsi, nx, ny):
@@ -307,7 +380,7 @@ def test_fused_wrapper_equals_the_composition():
     fused = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
 
     geom = model_geometry(ds)
-    img = render_model_region(ds, time=time[0], freq=freq[0])
+    img = render_model_region(ds, time=time[0], freq_out=freq[0])
     sv = degrid_stokes(
         uvw,
         chan,
@@ -357,3 +430,58 @@ def test_fused_wrapper_identity_mueller_matches_no_beam():
     no_beam = model_to_apparent_vis_for_region(ds, **kw)
     with_beam = model_to_apparent_vis_for_region(ds, mueller=_mueller(1, 1, nx, ny), **kw)
     assert_allclose(with_beam, no_beam, atol=1e-10)
+
+
+def test_stokes_out_relabels_a_non_prefix_mueller():
+    """A 2-plane (I, V) Mueller output is mislabelled "IQ" by the default
+    IQUV-prefix assumption; `stokes_out` lets the caller name it correctly.
+    Circular correlations make the I/V distinction visible (Q does not enter
+    RR/LL)."""
+    ds, _, time, freq, _ = _synthetic_mds()
+    rng = np.random.default_rng(33)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
+    corr = ("RR", "LL")
+    nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
+
+    # a genuine (I, V) Mueller: plane 0 keeps I, plane 1 leaks some I into V
+    mueller = np.zeros((2, 1, nx, ny))
+    mueller[0, 0] = 1.0
+    mueller[1, 0] = 0.3
+
+    kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0], mueller=mueller)
+    labelled = model_to_apparent_vis_for_region(ds, stokes_out="IV", **kw)
+    default = model_to_apparent_vis_for_region(ds, **kw)
+
+    geom = model_geometry(ds)
+    image = apply_mueller(render_model_region(ds, time=time[0], freq_out=freq[0]), mueller)
+    stokes_vis = degrid_stokes(
+        uvw,
+        chan,
+        image,
+        cell_rad=geom["cell_rad"],
+        x0=geom["x0"],
+        y0=geom["y0"],
+        flip_u=geom["flip_u"],
+        flip_v=geom["flip_v"],
+        flip_w=geom["flip_w"],
+    )
+    manual = stokes_vis_to_corr(stokes_vis, "IV", corr)
+
+    assert_allclose(labelled, manual)
+    assert not np.allclose(labelled, default)
+
+
+def test_stokes_out_rejects_length_mismatch():
+    ds, _, time, freq, _ = _synthetic_mds()
+    rng = np.random.default_rng(34)
+    uvw, chan = _uvw_freq(rng, nrow=50, nchan=2)
+    with pytest.raises(ValueError, match="stokes_out"):
+        model_to_apparent_vis_for_region(
+            ds,
+            uvw=uvw,
+            freq=chan,
+            corr_types=("XX", "YY"),
+            time=time[0],
+            freq_out=freq[0],
+            stokes_out="IQU",
+        )

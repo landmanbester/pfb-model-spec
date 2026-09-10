@@ -11,7 +11,8 @@ convention": this library deliberately does not transpose to pfb-imaging's
 `(Y, X)` raster convention, so no transpose appears anywhere below.
 """
 
-from typing import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import xarray as xr
@@ -66,7 +67,8 @@ def stokes_vis_to_corr(
     if len(stokes_in) != stokes_vis.shape[0]:
         raise ValueError(f"stokes_in has {len(stokes_in)} entries but stokes_vis has {stokes_vis.shape[0]} planes")
     nrow, nchan = stokes_vis.shape[1:]
-    out = np.zeros((nrow, nchan, len(corr_types)), dtype=stokes_vis.dtype)
+    dtype = np.result_type(stokes_vis.dtype, np.complex64)
+    out = np.zeros((nrow, nchan, len(corr_types)), dtype=dtype)
     index = {s: i for i, s in enumerate(stokes_in)}
     for c, corr in enumerate(corr_types):
         try:
@@ -158,7 +160,7 @@ def degrid_stokes(
     return out
 
 
-def model_geometry(model_ds: xr.Dataset) -> dict:
+def model_geometry(model_ds: xr.Dataset) -> dict[str, Any]:
     """Extract the gridding geometry a `.mds` records.
 
     Callers pass these straight to :func:`degrid_stokes`. Reading them here
@@ -172,10 +174,15 @@ def model_geometry(model_ds: xr.Dataset) -> dict:
         "stokes"}``.
 
     Raises:
-        ValueError: If the pixels are not square, since ``degrid_stokes`` takes
-            a single ``cell_rad``.
+        ValueError: If the `.mds` declares a spec this module does not know,
+            or if the pixels are not square, since ``degrid_stokes`` takes a
+            single ``cell_rad``.
     """
     a = model_ds.attrs
+    spec = str(a.get("spec", "genesis"))
+    if spec not in _SUPPORTED_SPECS:
+        raise ValueError(f"Unsupported .mds spec {spec!r}; this module understands {sorted(_SUPPORTED_SPECS)}")
+
     cell_x = float(a["cell_rad_x"])
     cell_y = float(a["cell_rad_y"])
     if cell_x != cell_y:
@@ -200,7 +207,7 @@ def render_model_region(
     model_ds: xr.Dataset,
     *,
     time: float,
-    freq: float,
+    freq_out: float,
     nx: int | None = None,
     ny: int | None = None,
     cell_rad: float | None = None,
@@ -209,8 +216,8 @@ def render_model_region(
 ) -> np.ndarray:
     """Render a component model to an image at one time and frequency.
 
-    The model is a continuous function of time and frequency, so ``freq`` may
-    lie between the bands the model was fitted at -- that is what lets a
+    The model is a continuous function of time and frequency, so ``freq_out``
+    may lie between the bands the model was fitted at -- that is what lets a
     consumer predict at finer spectral resolution than the imaging run used.
 
     The output grid defaults to the model's own. Supplying a different one
@@ -227,7 +234,7 @@ def render_model_region(
     Args:
         model_ds: An opened `.mds` dataset.
         time: Time to evaluate at, in the model's own time units.
-        freq: Frequency to evaluate at, in Hz.
+        freq_out: Frequency to evaluate at, in Hz.
         nx: Output pixels along x. Defaults to the model's ``npix_x``.
         ny: Output pixels along y. Defaults to the model's ``npix_y``.
         cell_rad: Output pixel size in radians. Defaults to the model's.
@@ -261,7 +268,7 @@ def render_model_region(
 
     image = eval_coeffs_to_slice(
         time,
-        freq,
+        freq_out,
         model_ds.coefficients.values,
         model_ds.location_x.values,
         model_ds.location_y.values,
@@ -327,6 +334,7 @@ def model_to_apparent_vis_for_region(
     time: float,
     freq_out: float,
     mueller: np.ndarray | None = None,
+    stokes_out: str | Sequence[str] | None = None,
     mask: np.ndarray | None = None,
     region_mask: np.ndarray | None = None,
     epsilon: float = 1e-7,
@@ -357,6 +365,16 @@ def model_to_apparent_vis_for_region(
             bands the model was fitted at.
         mueller: Optional Stokes-basis Mueller block on the model grid, shape
             ``(nstokes_out, nstokes_in, nx, ny)``.
+        stokes_out: Optional Stokes products of the planes being degridded (the
+            rendered image after ``mueller``, if any, has been applied), in
+            that axis's order, e.g. ``"IV"``. Passed as the ``stokes_in``
+            argument to :func:`stokes_vis_to_corr`. When ``None`` (the
+            default): if no Mueller was applied, the model's own ``stokes``
+            attr is used; if a Mueller was applied, the planes are *assumed*
+            to be an ``"IQUV"`` prefix of length ``nstokes_out`` -- this
+            assumption is wrong whenever the Mueller's output axis is not such
+            a prefix (e.g. a 2-plane (I, V) Mueller, mislabelled ``"IQ"`` by
+            the default), so pass ``stokes_out`` explicitly in that case.
         mask: Optional ``(nrow, nchan)`` visibility mask; zero entries are not
             degridded and come back as exactly zero.
         region_mask: Optional ``(nx, ny)`` image mask applied to the rendered
@@ -370,15 +388,17 @@ def model_to_apparent_vis_for_region(
         Complex visibilities, shape ``(nrow, nchan, len(corr_types))``.
 
     Raises:
-        ValueError: If ``region_mask``'s grid does not match the model grid, or
-            if the composed primitives raise ValueError: non-square pixels from
-            :func:`model_geometry`, an unsupported ``.mds`` spec from
+        ValueError: If ``region_mask``'s grid does not match the model grid,
+            if ``stokes_out``'s length does not match the number of image
+            planes being degridded, or if the composed primitives raise
+            ValueError: non-square pixels from :func:`model_geometry`, an
+            unsupported ``.mds`` spec from :func:`model_geometry` or
             :func:`render_model_region`, a Mueller shape mismatch from
             :func:`apply_mueller`, or an unsupported correlation from
             :func:`stokes_vis_to_corr`.
     """
     geom = model_geometry(model_ds)
-    image = render_model_region(model_ds, time=time, freq=freq_out)
+    image = render_model_region(model_ds, time=time, freq_out=freq_out)
     stokes_in = geom["stokes"]
 
     if region_mask is not None:
@@ -391,6 +411,14 @@ def model_to_apparent_vis_for_region(
         # a Mueller may map a single intrinsic Stokes product onto several
         # apparent ones, so the labels follow its output axis, not the model's
         stokes_in = "IQUV"[: image.shape[0]]
+
+    if stokes_out is not None:
+        stokes_out = tuple(stokes_out)
+        if len(stokes_out) != image.shape[0]:
+            raise ValueError(
+                f"stokes_out has {len(stokes_out)} entries but the rendered image has {image.shape[0]} planes"
+            )
+        stokes_in = stokes_out
 
     stokes_vis = degrid_stokes(
         uvw,
