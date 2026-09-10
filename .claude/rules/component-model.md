@@ -55,6 +55,61 @@ doc and `utils/io.py`'s docstrings should be updated together when that lands.
   it. Both `model_to_ds` and the `model2comps` converter build through here, so the two write paths
   cannot drift from each other or from `model_from_mds`'s reader.
 
+## The degrid API (`utils/degrid.py`)
+
+Turns a component model into visibilities for one chunk of data. Pure numpy — no dask, no
+Ray, no measurement-set handles, no `pfb_imaging` import. Data selection, chunking,
+distribution and the MS write belong to the calling application (pfb-imaging's
+`degrid-msv4`, ratt-ru/pfb-imaging#278; QuartiCal later).
+
+- `model_geometry(model_ds)` → the `.mds` gridding attrs as a dict (`nx`, `ny`, `cell_rad`,
+  `x0`, `y0`, `flip_u/v/w`, `stokes`). Callers pass these to `degrid_stokes` rather than
+  reading attrs by hand; raises on non-square pixels.
+- `render_model_region(model_ds, *, time, freq, nx=…, ny=…, cell_rad=…, x0=…, y0=…)` →
+  `(nstokes, nx, ny)`. Wraps `eval_coeffs_to_slice`; the output grid defaults to the model's
+  own. `freq` may lie between fitted bands — that continuity is what lets a consumer predict
+  at finer spectral resolution than the imaging run used.
+- `apply_mueller(stokes_image, mueller)` → `(nstokes_out, nx, ny)`. Pixelwise
+  `apparent[i] = Σ_j mueller[i,j]·intrinsic[j]`. Never builds a beam and never folds the
+  wgridder's `1/n` term; a caller that folds `1/n` into its beam must keep
+  `divide_by_n=False` in `degrid_stokes`.
+- `degrid_stokes(uvw, freq, stokes_image, *, cell_rad, x0, y0, flip_*, …, mask=None)` →
+  `(nstokes, nrow, nchan)`. One `dirty2vis` per Stokes plane; empty planes are skipped.
+  `mask` is `(nrow, nchan)` and exists because xarray-ms pads absent `(time, baseline)`
+  cells with NaN UVW.
+- `stokes_vis_to_corr(stokes_vis, stokes_in, corr_types)` → `(nrow, nchan, ncorr)`. Exact
+  linear map; Stokes products absent from `stokes_in` are zero, so an I-only model gives
+  `XX == YY == I`, `XY == YX == 0`. The coefficients match
+  `africanus.model.coherency.convert` (verified elementwise) but are hard-coded, because
+  tests here must not depend on africanus.
+- `model_to_apparent_vis_for_region(…)` — the fused per-chunk wrapper over the above.
+
+**Why five functions and not one.** Three consumers need pieces rather than the whole:
+`--transfer-model-from` (ratt-ru/pfb-imaging#309) needs only `render_model_region`;
+region-file degridding (ratt-ru/pfb-imaging#115) renders once and degrids N+1 times behind
+different masks; chunks sharing a `(time, freq)` bin can reuse one rendering.
+
+**Axis convention.** x-major throughout, like the rest of this library — and ducc0's
+`dirty2vis` is also x-major, so there is no transpose anywhere in this module. Callers on a
+`(Y, X)` raster (pfb-imaging) transpose at their own call site; note that the fused wrapper
+returns *visibilities*, which have no image orientation, so a degridding consumer never
+transposes at all.
+
+**Representative time/frequency.** `time`/`freq_out` are the caller's choice for a chunk,
+conventionally the **unweighted** means of its axes. Unweighted is deliberate: it is
+reproducible across consumers regardless of their flagging, so two applications cannot
+disagree about where the model was evaluated. (This differs from pfb-imaging's D28
+weight-weighted effective frequency, which is an *imager* rule that applies where weights
+are in hand.)
+
+**Known limitation — resampling is not flux-conserving when coarsening.**
+`eval_coeffs_to_slice` scales by `area_ratio = pix_area_out / pix_area_in`, correct for a
+surface-brightness field but not for the point components a `.mds` stores. Measured with a
+single unit component: same grid → 1.0 (exact); refine ×2 → 1.0 (conserved); coarsen ×2 →
+4.0; coarsen ×4 → 16.0, i.e. inflated by exactly `area_ratio`. Degridding always renders on
+the model's own grid and is unaffected, but `--transfer-model-from`
+(ratt-ru/pfb-imaging#309) will hit it.
+
 ## The converter (`core/model2comps.py`, `utils/fits.py`)
 
 - `model2comps(output_filename, from_fits, ...)` (core) — the portable **WSClean FITS → `.mds`**
@@ -94,10 +149,9 @@ Owned by the (deferred) converter; `model_from_mds` reads it, so the field names
 
 - the pfb-imaging **`.dds` reading path** (coupled to pfb-imaging's dataset format and its heavier
   deps — `daskms`, `ducc0`); the `model2comps` converter migrated only the portable FITS-input path;
-- a shared **`.mds` reader** returning coefficients + symbolic expr + geometry (not just a rendered
-  cube like `model_from_mds`) for pfb-imaging's `degrid` and QuartiCal to consume instead of
-  re-implementing the `parse_expr`/`lambdify` schema read inline — coordinate with
-  ratt-ru/pfb-imaging#278.
+- ~~a shared **`.mds` reader** … for pfb-imaging's `degrid` and QuartiCal~~ — **built**, see
+  "The degrid API" above (`model_geometry` + `render_model_region` replace the inline
+  `parse_expr`/`lambdify` schema read).
 
 ## Testing
 
