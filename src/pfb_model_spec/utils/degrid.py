@@ -14,7 +14,10 @@ convention": this library deliberately does not transpose to pfb-imaging's
 from typing import Sequence
 
 import numpy as np
+import xarray as xr
 from ducc0.wgridder.experimental import dirty2vis
+
+from pfb_model_spec.utils.modelspec import eval_coeffs_to_slice
 
 # Stokes -> correlation expressions, matching africanus.model.coherency.convert
 # (verified elementwise; africanus is deliberately not a dependency here because
@@ -29,6 +32,11 @@ _STOKES_TO_CORR: dict[str, dict[str, complex]] = {
     "LR": {"Q": 1.0 + 0j, "U": -1.0j},
     "LL": {"I": 1.0 + 0j, "V": -1.0 + 0j},
 }
+
+# .mds spec versions this module understands. A new spec (e.g. the (Y, X) +
+# stokes-axis revision, issues #19/#20) must be added here deliberately, not
+# silently accepted -- the axis order and the stokes axis both change meaning.
+_SUPPORTED_SPECS = frozenset({"genesis"})
 
 
 def stokes_vis_to_corr(
@@ -148,3 +156,131 @@ def degrid_stokes(
             nthreads=nthreads,
         )
     return out
+
+
+def model_geometry(model_ds: xr.Dataset) -> dict:
+    """Extract the gridding geometry a `.mds` records.
+
+    Callers pass these straight to :func:`degrid_stokes`. Reading them here
+    rather than at each call site keeps the convention in one place.
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+
+    Returns:
+        ``{"nx", "ny", "cell_rad", "x0", "y0", "flip_u", "flip_v", "flip_w",
+        "stokes"}``.
+
+    Raises:
+        ValueError: If the pixels are not square, since ``degrid_stokes`` takes
+            a single ``cell_rad``.
+    """
+    a = model_ds.attrs
+    cell_x = float(a["cell_rad_x"])
+    cell_y = float(a["cell_rad_y"])
+    if cell_x != cell_y:
+        raise ValueError(
+            f"Non-square pixels (cell_rad_x={cell_x}, cell_rad_y={cell_y}) are "
+            "not supported; degridding takes a single cell size"
+        )
+    return {
+        "nx": int(a["npix_x"]),
+        "ny": int(a["npix_y"]),
+        "cell_rad": cell_x,
+        "x0": float(a["center_x"]),
+        "y0": float(a["center_y"]),
+        "flip_u": bool(a["flip_u"]),
+        "flip_v": bool(a["flip_v"]),
+        "flip_w": bool(a["flip_w"]),
+        "stokes": str(a["stokes"]),
+    }
+
+
+def render_model_region(
+    model_ds: xr.Dataset,
+    *,
+    time: float,
+    freq: float,
+    nx: int | None = None,
+    ny: int | None = None,
+    cell_rad: float | None = None,
+    x0: float | None = None,
+    y0: float | None = None,
+) -> np.ndarray:
+    """Render a component model to an image at one time and frequency.
+
+    The model is a continuous function of time and frequency, so ``freq`` may
+    lie between the bands the model was fitted at -- that is what lets a
+    consumer predict at finer spectral resolution than the imaging run used.
+
+    The output grid defaults to the model's own. Supplying a different one
+    resamples via ``eval_coeffs_to_slice``.
+
+    Note:
+        Resampling to a **coarser** grid is not flux-conserving for the point
+        components a `.mds` stores: ``eval_coeffs_to_slice`` applies an
+        ``area_ratio`` factor appropriate to a surface-brightness field, which
+        inflates a point component's flux by exactly that factor (measured:
+        coarsen x2 -> x4, coarsen x4 -> x16; refining and same-grid are exact).
+        Degridding always uses the model's own grid and so is unaffected.
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+        time: Time to evaluate at, in the model's own time units.
+        freq: Frequency to evaluate at, in Hz.
+        nx: Output pixels along x. Defaults to the model's ``npix_x``.
+        ny: Output pixels along y. Defaults to the model's ``npix_y``.
+        cell_rad: Output pixel size in radians. Defaults to the model's.
+        x0: Output phase-centre x offset. Defaults to the model's ``center_x``.
+        y0: Output phase-centre y offset. Defaults to the model's ``center_y``.
+
+    Returns:
+        The rendered image, shape ``(nstokes, nx, ny)``, x-major. ``nstokes``
+        is 1 for the ``genesis`` spec, which carries a single Stokes product;
+        the axis is present so that adding a Stokes axis (#19) changes values
+        rather than shapes.
+
+    Raises:
+        ValueError: If the `.mds` declares a spec this module does not know.
+    """
+    a = model_ds.attrs
+    spec = str(a.get("spec", "genesis"))
+    if spec not in _SUPPORTED_SPECS:
+        raise ValueError(f"Unsupported .mds spec {spec!r}; this module understands {sorted(_SUPPORTED_SPECS)}")
+
+    nxi, nyi = int(a["npix_x"]), int(a["npix_y"])
+    cellxi, cellyi = float(a["cell_rad_x"]), float(a["cell_rad_y"])
+    x0i, y0i = float(a["center_x"]), float(a["center_y"])
+
+    nxo = nxi if nx is None else int(nx)
+    nyo = nyi if ny is None else int(ny)
+    cellxo = cellxi if cell_rad is None else float(cell_rad)
+    cellyo = cellyi if cell_rad is None else float(cell_rad)
+    x0o = x0i if x0 is None else float(x0)
+    y0o = y0i if y0 is None else float(y0)
+
+    image = eval_coeffs_to_slice(
+        time,
+        freq,
+        model_ds.coefficients.values,
+        model_ds.location_x.values,
+        model_ds.location_y.values,
+        a["parametrisation"],
+        model_ds.params.values,
+        a["texpr"],
+        a["fexpr"],
+        nxi,
+        nyi,
+        cellxi,
+        cellyi,
+        x0i,
+        y0i,
+        nxo,
+        nyo,
+        cellxo,
+        cellyo,
+        x0o,
+        y0o,
+    )
+    # leading stokes axis: 1 for genesis, which stores a single product
+    return image[None]

@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from pfb_model_spec.utils.degrid import degrid_stokes, stokes_vis_to_corr
+from pfb_model_spec.utils.degrid import (
+    degrid_stokes,
+    model_geometry,
+    render_model_region,
+    stokes_vis_to_corr,
+)
+from pfb_model_spec.utils.io import build_mds_dataset
+from pfb_model_spec.utils.modelspec import fit_image_cube
 
 
 def test_stokes_vis_to_corr_linear():
@@ -161,3 +168,81 @@ def test_degrid_stokes_skips_empty_planes():
     vis = degrid_stokes(uvw, freq, img, cell_rad=cell, **_CONV)
     assert_allclose(vis[0], 1.0, atol=1e-6)
     assert np.abs(vis[1]).max() == 0.0
+
+
+def _synthetic_mds(nx=64, ny=48, nband=4):
+    """A two-component power-law model on a deliberately NON-square grid."""
+    freq = np.linspace(1.0e9, 1.2e9, nband)
+    time = np.array([0.0])
+    cell = np.deg2rad(2.0 / 3600.0)
+    cube = np.zeros((nband, nx, ny))
+    cube[:, 20, 31] = (freq / freq[0]) ** -0.7
+    cube[:, 44, 12] = 2.0 * (freq / freq[0]) ** -1.1
+    coeffs, xi, yi, expr, params, texpr, fexpr = fit_image_cube(
+        time, freq, cube[None], nbasisf=nband, method="Legendre", sigmasq=0
+    )
+    ds = build_mds_dataset(
+        coeffs,
+        xi,
+        yi,
+        expr,
+        params,
+        texpr,
+        fexpr,
+        time,
+        freq,
+        cell,
+        nx,
+        ny,
+        0.0,
+        0.0,
+        False,
+        True,
+        False,
+        (0.1, -0.5),
+        "I",
+        "test",
+    )
+    return ds, cube, time, freq, cell
+
+
+def test_render_model_region_matches_the_fitted_cube():
+    ds, cube, time, freq, _ = _synthetic_mds()
+    for band in (0, freq.size - 1):
+        got = render_model_region(ds, time=time[0], freq=freq[band])
+        assert got.shape == (1, ds.attrs["npix_x"], ds.attrs["npix_y"])
+        assert_allclose(got[0], cube[band], atol=1e-10)
+
+
+def test_render_model_region_interpolates_between_fitted_bands():
+    """The model is continuous in frequency -- this is what upsampling relies on."""
+    ds, cube, time, freq, _ = _synthetic_mds()
+    mid = 0.5 * (freq[0] + freq[1])
+    got = render_model_region(ds, time=time[0], freq=mid)[0]
+    lo, hi = cube[0, 20, 31], cube[1, 20, 31]
+    assert min(lo, hi) < got[20, 31] < max(lo, hi)
+
+
+def test_model_geometry_reads_the_mds_attrs():
+    ds, _, _, _, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    assert geom["nx"] == 64 and geom["ny"] == 48
+    assert geom["cell_rad"] == pytest.approx(cell)
+    assert geom["x0"] == 0.0 and geom["y0"] == 0.0
+    assert geom["flip_u"] is False and geom["flip_v"] is True
+    assert geom["stokes"] == "I"
+
+
+def test_model_geometry_rejects_non_square_pixels():
+    """cell_rad_x != cell_rad_y has no single cell_rad to hand the gridder."""
+    ds, _, _, _, cell = _synthetic_mds()
+    ds.attrs["cell_rad_y"] = 2.0 * cell
+    with pytest.raises(ValueError, match="square"):
+        model_geometry(ds)
+
+
+def test_render_model_region_rejects_unknown_spec():
+    ds, _, time, freq, _ = _synthetic_mds()
+    ds.attrs["spec"] = "some-future-spec"
+    with pytest.raises(ValueError, match="some-future-spec"):
+        render_model_region(ds, time=time[0], freq=freq[0])
