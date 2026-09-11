@@ -5,6 +5,41 @@ All notable changes to pfb-model-spec are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - 2026-09-11
+
+### Added
+
+- **degrid**: Add the fused model-to-apparent-visibility entry point
+- **degrid**: Apply a Stokes-basis Mueller beam to a model
+- **degrid**: Render a component model onto an arbitrary grid
+- **degrid**: Degrid Stokes images to visibilities with ducc0
+- **degrid**: Add Stokes to correlation conversion
+
+### CI
+
+- Exclude Markdown from ruff formatting
+
+### Dependencies
+
+- Bump the python-minor-patch group with 3 updates
+
+### Documentation
+
+- Document the degrid kernel API
+- **degrid**: Document the exceptions the fused entry point raises
+- Add the degrid kernel implementation plan
+
+### Fixed
+
+- **degrid**: Let callers name the apparent Stokes products
+
+### Other
+
+- Revise component model function documentation
+
+Co-authored-by: Copilot Autofix powered by AI <175728472+Copilot@users.noreply.github.com>
+
+
 ## [0.0.2] - 2026-07-22
 
 ### Added
@@ -84,6 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tidy synthetic modelspec test bounds and comments
 
 
+[0.0.3]: https://github.com/landmanbester/pfb-model-spec/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/landmanbester/pfb-model-spec/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/landmanbester/pfb-model-spec/releases/tag/v0.0.1
 
