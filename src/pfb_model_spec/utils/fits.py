@@ -7,8 +7,9 @@ parametrisation, CASA beam tables, and observation-time handling: a component
 model has no restoring beam and no meaningful DATE-OBS. This module has no
 dependency on pfb-imaging.
 
-Axis convention: like the `.mds` spec, model cubes handled here are x-major
-`(..., nx, ny)`; ``save_fits`` transposes to FITS row-major on write.
+Axis convention: the `.mds` spec 0.1 is `(Y, X)`, so ``save_fits`` is called with
+``yx_order=True``; the default ``yx_order=False`` accepts x-major `(..., nx, ny)` input and
+transposes to FITS row-major on write.
 """
 
 from datetime import datetime, timezone

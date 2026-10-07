@@ -31,6 +31,9 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
   correlations. Pure numpy — the calling application owns chunking, distribution and I/O.
   Consumed by pfb-imaging's `degrid-msv4` (ratt-ru/pfb-imaging#278). See
   `.claude/rules/component-model.md` → "The degrid API".
+- **Spec versioning + `pfbspec convert`** (`utils/spec.py`, `core/convert.py`) — the current spec is
+  `"0.1"` (Stokes axis, `(Y, X)` cubes); older `.mds` stores upgrade on read; a schema change needs a
+  breaking version bump plus a registry step. See `.claude/rules/component-model.md` → "Spec versions".
 - **Deferred (not yet built):** the pfb-imaging `.dds` reading path (coupled to pfb-imaging's
   dataset format / daskms). See `.claude/rules/component-model.md`.
 
@@ -65,7 +68,7 @@ src/pfb_model_spec/
 ├── _container_image.py    # CONTAINER_IMAGE — single source of truth for the image tag
 ├── cli/                   # lightweight Typer wrappers — generate-cabs parses these
 ├── core/                  # heavy implementations mirroring cli/ commands (one per command)
-├── utils/                 # modelspec.py (fit/render) + io.py (.mds write/re-render) + fits.py (portable FITS I/O)
+├── utils/                 # spec.py (versions/upgrade) + modelspec.py (fit/render) + io.py (.mds write/re-render) + fits.py (portable FITS I/O)
 └── cabs/                  # AUTO-GENERATED Stimela YAMLs — never hand-edit
 tests/                     # synthetic, MS-free tests (+ _synth.py helpers)
 ```
