@@ -113,6 +113,18 @@ def test_single_time_single_band_returns_the_data(method):
     assert_allclose(image, cube, rtol=1e-12)
 
 
+def test_single_sample_fit_ignores_a_zero_weight_plane():
+    """A zero-weight Stokes plane must not make the trivial (1 time, 1 band) fit singular."""
+    cube = np.zeros((1, 1, 2, 4, 6))
+    cube[0, 0, 0, 1, 5] = 3.0
+    cube[0, 0, 1, 3, 2] = -1.5
+    time, freq = np.array([0.0]), np.array([1.4e9])
+    wgt = np.array([[[1.0, 0.0]]])
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(time, freq, cube, wgt=wgt)
+    image = eval_coeffs_to_cube(time, freq, 6, 4, coeffs, yi, xi, expr, params, texpr, fexpr)
+    assert_allclose(image, cube, rtol=1e-12)
+
+
 def test_poly_fit_with_a_single_band():
     """Used to raise UnboundLocalError: ffunc was never defined for poly with one band."""
     time, freq = np.array([1.0, 2.0]), np.array([1.4e9])

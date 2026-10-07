@@ -383,6 +383,7 @@ def model_to_apparent_vis_for_region(
             :func:`apply_mueller`, or an unsupported correlation from
             :func:`stokes_vis_to_corr`.
     """
+    model_ds = upgrade(model_ds)  # once, so the two readers below need not repeat it
     geom = model_geometry(model_ds)
     image = render_model_region(model_ds, time=time, freq_out=freq_out)
     stokes_in = geom["stokes"]

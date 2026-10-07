@@ -50,6 +50,17 @@ def test_convert_refuses_in_place(tmp_path, monkeypatch, alias):
         convert(str(src), alias.format(p=src, rel="g.mds"), overwrite=True)
 
 
+@pytest.mark.parametrize("nesting", ["output_contains_input", "input_contains_output"])
+def test_convert_refuses_nested_stores(tmp_path, nesting):
+    """Overwriting a parent of the input would delete the input before it is read."""
+    src = tmp_path / "models" / "g.mds"
+    genesis_dataset().to_zarr(src)
+    dst = tmp_path / "models" if nesting == "output_contains_input" else src / "sub.mds"
+    with pytest.raises(ValueError, match="contains the other"):
+        convert(str(src), str(dst), overwrite=True)
+    assert xr.open_zarr(src, chunks=None).attrs["spec"] == "genesis"
+
+
 def test_convert_works_on_remote_uris():
     """fsspec's in-memory filesystem stands in for s3:// / gs:// here."""
     src, dst = "memory://convert-test/g.mds", "memory://convert-test/new.mds"

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import numpy as np
 import sympy as sm
 from scipy.interpolate import RegularGridInterpolator
@@ -7,7 +9,7 @@ from sympy.utilities.lambdify import lambdify
 from pfb_model_spec.utils.spec import open_mds
 
 
-def _scale(x, sym, method):
+def _scale(x: np.ndarray, sym: sm.Symbol, method: str) -> tuple[np.ndarray, sm.Expr]:
     """Map an axis onto the fit domain, returning ``(scaled values, sympy scaling expr)``.
 
     A length-1 axis is left unscaled: only the constant basis function can be fitted to
@@ -41,7 +43,7 @@ def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, meth
             (default ``nband``).
         method: ``"poly"`` (monomials) or ``"Legendre"``.
         sigmasq: Ridge term added to the Hessian; ignored when ``ntime == nband == 1``
-            (nothing to fit, the data are the coefficients).
+            (nothing to fit: the data are the coefficients, whatever the weights).
 
     Returns:
         ``(coeffs, y_index, x_index, expr, params, texpr, fexpr)``:
@@ -69,8 +71,6 @@ def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, meth
     nbasisf = nband if nbasisf is None else nbasisf
     if not 1 <= nbasist <= ntime or not 1 <= nbasisf <= nband:
         raise ValueError(f"need 1 <= nbasist <= {ntime} and 1 <= nbasisf <= {nband}")
-    if ntime == 1 and nband == 1:
-        sigmasq = 0
 
     if method == "poly":
 
@@ -109,6 +109,10 @@ def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, meth
 
     coeffs = np.zeros((nstokes, xfit.shape[1], y_index.size), dtype=np.result_type(beta.dtype, float))
     for s in range(nstokes):
+        if ntime == 1 and nband == 1:
+            # nothing to fit (the basis is the constant 1); a zero weight would make it singular
+            coeffs[s] = beta[:, s]
+            continue
         w = wgt[:, s : s + 1]
         hess = xfit.T.dot(w * xfit)
         if sigmasq:
@@ -119,7 +123,7 @@ def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, meth
     return coeffs, y_index, x_index, str(expr), [str(p) for p in params], str(tfunc), str(ffunc)
 
 
-def _model_functions(expr, paramf, texpr, fexpr):
+def _model_functions(expr: str, paramf: list[str], texpr: str, fexpr: str) -> tuple[Callable, Callable, Callable]:
     """Lambdify a stored parametrisation into ``(modelf, tfunc, ffunc)``."""
     params = sm.symbols(("t", "f"))
     params += sm.symbols(tuple(paramf))
@@ -181,7 +185,21 @@ def eval_coeffs_to_slice(
     return out
 
 
-def _resample_xmajor(image_in, nxi, nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo, cellyo, x0o, y0o):
+def _resample_xmajor(
+    image_in: np.ndarray,
+    nxi: int,
+    nyi: int,
+    cellxi: float,
+    cellyi: float,
+    x0i: float,
+    y0i: float,
+    nxo: int,
+    nyo: int,
+    cellxo: float,
+    cellyo: float,
+    x0o: float,
+    y0o: float,
+) -> np.ndarray:
     """Zero-pad and bilinearly resample an x-major ``(nxi, nyi)`` slice onto ``(nxo, nyo)``."""
     pix_area_in = cellxi * cellyi
     pix_area_out = cellxo * cellyo

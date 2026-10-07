@@ -30,19 +30,22 @@ def convert(input_mds: str | os.PathLike, output_mds: str | os.PathLike, overwri
 
     Args:
         input_mds: Source `.mds` (local path or remote URI) at any known spec.
-        output_mds: Destination `.mds`; must not be the source.
+        output_mds: Destination `.mds`; must neither be, contain, nor lie inside the source.
         overwrite: Replace ``output_mds`` if it exists.
 
     Raises:
-        ValueError: If input and output are the same store, if the output exists and
+        ValueError: If input and output are the same store or one contains the other, if the output exists and
             ``overwrite`` is False, or if the input's spec is unknown or newer than this
             package understands.
     """
     if not log.handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 
-    if _canonical(input_mds) == _canonical(output_mds):
+    src, dst = _canonical(input_mds), _canonical(output_mds)
+    if src == dst:
         raise ValueError(f"Input and output are the same store ({input_mds}); in-place conversion is not supported")
+    if src.startswith(dst.rstrip("/") + "/") or dst.startswith(src.rstrip("/") + "/"):
+        raise ValueError(f"One of {input_mds} and {output_mds} contains the other; writing would corrupt the input")
     if UPath(output_mds).exists() and not overwrite:
         raise ValueError(f"{output_mds} exists. Set overwrite=True to replace it.")
 
