@@ -13,6 +13,7 @@ import xarray as xr
 from astropy.io import fits
 from numpy.testing import assert_allclose
 
+from pfb_model_spec import __version__
 from pfb_model_spec.core.model2comps import model2comps
 from pfb_model_spec.utils.modelspec import model_from_mds
 from tests._synth import gaussian2d, give_edges
@@ -86,11 +87,13 @@ def test_model2comps_fits_roundtrip(tmp_path):
 
     # schema
     mds = xr.open_zarr(coeff_name, chunks=None)
-    assert mds.attrs["spec"] == "genesis"
+    assert mds.attrs["spec"] == "0.1"
+    assert mds.attrs["writer-version"] == __version__
+    assert list(mds.stokes.values) == ["I"]
+    assert "stokes" not in mds.attrs
     assert mds.attrs["npix_x"] == nx
     assert mds.attrs["npix_y"] == ny
     assert_allclose(mds.attrs["cell_rad_x"], np.deg2rad(cell_deg))
-    assert mds.attrs["stokes"] == "I"
     assert mds.attrs["flip_v"] is True
     assert mds.attrs["flip_u"] is False
     assert_allclose(mds.attrs["ra"], np.deg2rad(ra_deg))
@@ -98,13 +101,16 @@ def test_model2comps_fits_roundtrip(tmp_path):
     assert_allclose(mds.freqs.values, freq)
 
     # numerical round-trip: exact fit reproduces the input on the source mask
-    rendered = model_from_mds(coeff_name)[0]  # (nchan, nx, ny)
-    assert rendered.shape == model.shape
-    mask = model > 0
-    assert_allclose(rendered[mask], model[mask], atol=1e-8)
+    model_yx = model.transpose(0, 2, 1)  # the FITS planes as written: (nchan, ny, nx)
+    rendered = model_from_mds(coeff_name)[0, :, 0]  # (nchan, ny, nx)
+    assert rendered.shape == model_yx.shape
+    mask = model_yx > 0
+    assert_allclose(rendered[mask], model_yx[mask], atol=1e-8)
 
-    # the sanity-render FITS was written at the mds location
-    assert (tmp_path / "out.fits").exists()
+    # the sanity FITS must match the input planes pixel for pixel, not transposed
+    sanity = fits.getdata(tmp_path / "out.fits")
+    assert sanity.shape == (1, nchan, ny, nx)
+    assert_allclose(sanity[0], model_yx, atol=1e-6)
 
 
 def test_model2comps_overwrite_guard(tmp_path):
@@ -129,3 +135,13 @@ def test_model2comps_overwrite_guard(tmp_path):
 def test_model2comps_no_images(tmp_path):
     with pytest.raises(ValueError, match="No images"):
         model2comps(str(tmp_path / "out"), from_fits=str(tmp_path / "does-not-exist"))
+
+
+def test_model2comps_rejects_a_non_stokes_product(tmp_path):
+    nchan, nx, ny = 2, 24, 16
+    freq = np.linspace(1.0e9, 1.5e9, nchan)
+    model = _synth_cube(nchan, nx, ny, freq, float(freq.mean()))
+    prefix = str(tmp_path / "wsclean")
+    _write_wsclean_fits(prefix, model, freq, 2.5 / 3600.0, 0.0, -30.0, np.ones(nchan))
+    with pytest.raises(ValueError, match="product"):
+        model2comps(str(tmp_path / "out"), from_fits=prefix, nbasisf=nchan, product="IQ")
