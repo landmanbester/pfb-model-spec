@@ -22,7 +22,7 @@ mechanism.
 
 1. A spec-versioning policy and an upgrade registry that converts any older spec to the current
    one (one-way; newer specs may not be expressible in older ones).
-2. A `pfbspec convert INPUT OUTPUT` command that detects the input spec from `attrs["spec"]`.
+2. A `pfbspec convert --input-mds IN --output-mds OUT [--overwrite]` command that detects the input spec from `attrs["spec"]`.
 3. Transparent in-memory upgrade on read, so old `.mds` datasets keep working in every reader.
 4. Spec `"0.1"`: a Stokes axis and `(Y, X)`-ordered rendered cubes.
 5. Merge `fit_image_cube` and `fit_image_fscube` into one function.
@@ -243,7 +243,10 @@ All synthetic, with no MS; they run with `uv run --extra full pytest`.
 
 1. On a feature branch, implement the above; `CONTAINER_IMAGE` gets the branch tag per
    `architecture.md`.
-2. Merge, then `tbump 0.1.0`.
+2. Merge. **Before `tbump 0.1.0`**, either release a pfb-imaging patch that caps
+   `pfb-model-spec<0.1`, or land the pfb-imaging adoption PR first: pfb-imaging currently pins
+   `pfb-model-spec[full]>=0.0.3` with no upper bound, so publishing 0.1.0 would break fresh
+   installs (deconv's `model_to_ds` call, degrid's `geom["stokes"].upper()`). Then `tbump 0.1.0`.
 3. Follow-up PR in pfb-imaging (not part of this plan's implementation):
    - remove the `(Y, X) ↔ (X, Y)` transposes around `model_to_ds` in `deconv`;
    - add the Stokes axis at the `model_to_ds` and degrid call sites;

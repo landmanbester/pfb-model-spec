@@ -2,7 +2,8 @@
 
 Policy (see `.claude/rules/component-model.md`): a spec is named after the ``major.minor``
 of the pfb-model-spec release that introduced it, and any schema change requires a breaking
-version bump. ``"genesis"`` is the legacy (pre-versioning) name for ``"0.0"``. Older specs
+version bump. ``"genesis"`` is the legacy name of every pre-versioning ``.mds`` (a literal ``"0.0"`` is not
+a known spec). Older specs
 always upgrade to newer ones; there is no downgrade path, because a newer spec may hold
 things an older one cannot express.
 
@@ -33,6 +34,16 @@ def _genesis_to_0_1(ds: xr.Dataset) -> xr.Dataset:
     Lossless: no values change. ``location_x`` indexes FITS ``NAXIS1`` in both specs; the
     ``(Y, X)`` change in 0.1 affects only the axis order of rendered cubes.
     """
+    if ds.coefficients.ndim != 2:
+        raise ValueError(
+            f"This genesis .mds has multi-correlation coefficients (dims {ds.coefficients.dims}); "
+            "it cannot be upgraded -- re-fit it with `pfbspec model2comps`"
+        )
+    if "stokes" not in ds.attrs:
+        raise ValueError(
+            "genesis .mds has no 'stokes' attr, so its Stokes product is unknown; "
+            "it cannot be upgraded -- re-fit it with `pfbspec model2comps`"
+        )
     attrs = dict(ds.attrs)
     stokes = str(attrs.pop("stokes"))
     if stokes not in _STOKES:

@@ -78,3 +78,11 @@ def test_convert_accepts_path_objects(tmp_path):
     genesis_dataset().to_zarr(src)
     convert(UPath(src), UPath(tmp_path / "new.mds"))
     assert np.array_equal(xr.open_zarr(tmp_path / "new.mds", chunks=None).location_x.values, [4, 27, 15])
+
+
+def test_remote_filesystems_are_installed():
+    from upath import UPath
+
+    # constructing the filesystem needs s3fs/gcsfs but does no network I/O
+    assert UPath("s3://some-bucket/x.mds", anon=True).fs is not None
+    assert UPath("gs://some-bucket/x.mds").fs is not None

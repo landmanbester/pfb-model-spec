@@ -172,3 +172,29 @@ def test_build_mds_dataset_rejects_a_stokes_length_mismatch():
             ["I"],
             "v",
         )
+
+
+def test_model_to_ds_rejects_a_transposed_model(tmp_path):
+    nband, nx, ny = 2, 16, 12
+    freq = np.linspace(1.0e9, 2.0e9, nband)
+    wrong = np.zeros((nband, 1, nx, ny))  # (nband, nstokes, nx, ny): transposed, non-square
+    with pytest.raises(ValueError, match=r"\(nband, nstokes, ny, nx\)"):
+        model_to_ds(
+            np.array([0.0]),
+            freq,
+            np.ones(nband, dtype=bool),
+            wrong,
+            np.ones((nband, 1)),
+            str(tmp_path / "x.mds"),
+            1e-5,
+            nx,
+            ny,
+            0.0,
+            0.0,
+            False,
+            True,
+            False,
+            (0.0, 0.0),
+            ["I"],
+            "test",
+        )

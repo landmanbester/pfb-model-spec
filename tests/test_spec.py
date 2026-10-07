@@ -88,3 +88,18 @@ def test_open_mds_upgrades_on_read(tmp_path):
     ds = open_mds(path)
     assert spec_of(ds) == SPEC_VERSION
     assert np.array_equal(ds.coefficients.values, COEFFS[None])
+
+
+def test_genesis_without_a_stokes_attr_is_rejected_clearly():
+    with pytest.raises(ValueError, match="no 'stokes' attr"):
+        upgrade(genesis_dataset(stokes=None))
+
+
+def test_genesis_with_multi_correlation_coefficients_is_rejected_clearly():
+    import xarray as xr
+
+    ds = genesis_dataset()
+    ds = ds.assign(coefficients=(("corr", "par", "comps"), ds.coefficients.values[None]))
+    assert isinstance(ds, xr.Dataset)
+    with pytest.raises(ValueError, match="multi-correlation"):
+        upgrade(ds)

@@ -48,7 +48,7 @@ def _write_wsclean_fits(prefix, model, freq, cell_deg, ra_deg, dec_deg, wsums):
     """Write an x-major (nchan, nx, ny) cube as WSClean `-####-model.fits` planes."""
     nchan, nx, ny = model.shape
     for b in range(nchan):
-        # FITS data is row-major (ny, nx); the converter transposes back on read.
+        # FITS data is row-major (ny, nx), i.e. the transpose of the x-major input.
         hdu = fits.PrimaryHDU(data=model[b].T.astype(np.float32))
         hdr = hdu.header
         hdr["CRVAL1"] = ra_deg

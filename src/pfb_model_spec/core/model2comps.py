@@ -126,7 +126,7 @@ def model2comps(
         model_out: Explicit `.mds` path, overriding the derived name.
         out_freqs: ``flow:fhigh:step`` (Hz) to render the model FITS onto; renders
             at the input band frequencies when omitted.
-        product: Stokes/correlation product recorded in the `.mds`.
+        product: single Stokes parameter (I, Q, U or V) recorded in the `.mds`.
         fits_output_folder: Directory for the rendered model FITS (cwd if omitted).
 
     Raises:

@@ -167,6 +167,15 @@ def model_to_ds(
         The model cube re-rendered from the fitted coefficients, shape
         `(nband, nstokes, ny, nx)`.
     """
+    if model.ndim != 4 or model.shape[-2:] != (ny, nx):
+        raise ValueError(
+            f"model must have shape (nband, nstokes, ny, nx) = (nband, nstokes, {ny}, {nx}), got {model.shape}"
+        )
+    if len(stokes) != model.shape[1]:
+        raise ValueError(
+            f"len(stokes) = {len(stokes)} does not match model.shape[1] = {model.shape[1]} "
+            "(expected layout (nband, nstokes, ny, nx))"
+        )
     coeffs, y_index, x_index, expr, params, texpr, fexpr = fit_image_cube(
         time,
         freq[fsel],
