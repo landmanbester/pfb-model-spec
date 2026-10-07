@@ -1,0 +1,36 @@
+cabs:
+  convert:
+    flavour: python
+    command: pfb_model_spec.core.convert.convert
+    name: convert
+    info:
+      Upgrade a component model (.mds) to the current spec.
+    image: ghcr.io/landmanbester/pfb-model-spec:spec-convert
+    inputs:
+      input-mds:
+        info:
+          Component model (.mds) to upgrade.
+          Its spec is detected from the dataset attrs.
+        dtype: Directory
+        required: true
+        policies:
+          positional: true
+        metadata:
+          rich_help_panel: Input
+        must_exist: true
+      overwrite:
+        info:
+          Allow overwrite of an existing output.
+        dtype: bool
+        default: false
+        metadata:
+          rich_help_panel: Control
+    outputs:
+      output-mds:
+        dtype: Directory
+        info:
+          Path to write the upgraded component model (.mds) to.
+        required: true
+        must_exist: false
+        metadata:
+          rich_help_panel: Output
