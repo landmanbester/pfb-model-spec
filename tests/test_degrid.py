@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from ducc0.wgridder.experimental import dirty2vis
 from numpy.testing import assert_allclose
 
 from pfb_model_spec.utils.degrid import (
@@ -14,6 +15,7 @@ from pfb_model_spec.utils.degrid import (
 )
 from pfb_model_spec.utils.io import build_mds_dataset
 from pfb_model_spec.utils.modelspec import fit_image_cube
+from tests._genesis import FREQS, genesis_cube, genesis_dataset
 
 
 def test_stokes_vis_to_corr_linear():
@@ -143,7 +145,7 @@ def test_degrid_stokes_geometry_round_trip():
         divide_by_n=False,
         nthreads=1,
     )
-    assert np.unravel_index(np.argmax(back), back.shape) == src
+    assert np.unravel_index(np.argmax(back), back.shape) == (src[1], src[0])
 
 
 def test_degrid_stokes_masks_absent_rows():
@@ -177,16 +179,16 @@ def _synthetic_mds(nx=64, ny=48, nband=4):
     freq = np.linspace(1.0e9, 1.2e9, nband)
     time = np.array([0.0])
     cell = np.deg2rad(2.0 / 3600.0)
-    cube = np.zeros((nband, nx, ny))
-    cube[:, 20, 31] = (freq / freq[0]) ** -0.7
-    cube[:, 44, 12] = 2.0 * (freq / freq[0]) ** -1.1
-    coeffs, xi, yi, expr, params, texpr, fexpr = fit_image_cube(
+    cube = np.zeros((nband, 1, ny, nx))
+    cube[:, 0, 31, 20] = (freq / freq[0]) ** -0.7
+    cube[:, 0, 12, 44] = 2.0 * (freq / freq[0]) ** -1.1
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(
         time, freq, cube[None], nbasisf=nband, method="Legendre", sigmasq=0
     )
     ds = build_mds_dataset(
         coeffs,
-        xi,
         yi,
+        xi,
         expr,
         params,
         texpr,
@@ -202,17 +204,17 @@ def _synthetic_mds(nx=64, ny=48, nband=4):
         True,
         False,
         (0.1, -0.5),
-        "I",
+        ["I"],
         "test",
     )
-    return ds, cube, time, freq, cell
+    return ds, cube[:, 0], time, freq, cell
 
 
 def test_render_model_region_matches_the_fitted_cube():
     ds, cube, time, freq, _ = _synthetic_mds()
     for band in (0, freq.size - 1):
         got = render_model_region(ds, time=time[0], freq_out=freq[band])
-        assert got.shape == (1, ds.attrs["npix_x"], ds.attrs["npix_y"])
+        assert got.shape == (1, ds.attrs["npix_y"], ds.attrs["npix_x"])
         assert_allclose(got[0], cube[band], atol=1e-10)
 
 
@@ -221,8 +223,8 @@ def test_render_model_region_interpolates_between_fitted_bands():
     ds, cube, time, freq, _ = _synthetic_mds()
     mid = 0.5 * (freq[0] + freq[1])
     got = render_model_region(ds, time=time[0], freq_out=mid)[0]
-    lo, hi = cube[0, 20, 31], cube[1, 20, 31]
-    assert min(lo, hi) < got[20, 31] < max(lo, hi)
+    lo, hi = cube[0, 31, 20], cube[1, 31, 20]
+    assert min(lo, hi) < got[31, 20] < max(lo, hi)
 
 
 def test_model_geometry_reads_the_mds_attrs():
@@ -232,7 +234,7 @@ def test_model_geometry_reads_the_mds_attrs():
     assert geom["cell_rad"] == pytest.approx(cell)
     assert geom["x0"] == 0.0 and geom["y0"] == 0.0
     assert geom["flip_u"] is False and geom["flip_v"] is True
-    assert geom["stokes"] == "I"
+    assert geom["stokes"] == ["I"]
 
 
 def test_model_geometry_rejects_non_square_pixels():
@@ -293,15 +295,15 @@ def _single_component_mds(nx=64, ny=48):
     freq = np.linspace(1.0e9, 1.2e9, 2)
     time = np.array([0.0])
     cell = np.deg2rad(2.0 / 3600.0)
-    cube = np.zeros((2, nx, ny))
-    cube[:, nx // 2, ny // 2] = 1.0
-    coeffs, xi, yi, expr, params, texpr, fexpr = fit_image_cube(
+    cube = np.zeros((2, 1, ny, nx))
+    cube[:, 0, ny // 2, nx // 2] = 1.0
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(
         time, freq, cube[None], nbasisf=2, method="Legendre", sigmasq=0
     )
     ds = build_mds_dataset(
         coeffs,
-        xi,
         yi,
+        xi,
         expr,
         params,
         texpr,
@@ -317,7 +319,7 @@ def _single_component_mds(nx=64, ny=48):
         True,
         False,
         (0.1, -0.5),
-        "I",
+        ["I"],
         "test",
     )
     return ds, time, freq, cell
@@ -406,8 +408,8 @@ def test_fused_wrapper_region_mask_selects_components():
     corr = ("XX", "YY")
     nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
 
-    inside = np.zeros((nx, ny))
-    inside[20, 31] = 1.0  # the first component only
+    inside = np.zeros((ny, nx))
+    inside[31, 20] = 1.0  # the first component only
     outside = 1.0 - inside
 
     kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
@@ -428,7 +430,7 @@ def test_fused_wrapper_identity_mueller_matches_no_beam():
     nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
     kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
     no_beam = model_to_apparent_vis_for_region(ds, **kw)
-    with_beam = model_to_apparent_vis_for_region(ds, mueller=_mueller(1, 1, nx, ny), **kw)
+    with_beam = model_to_apparent_vis_for_region(ds, mueller=_mueller(1, 1, ny, nx), **kw)
     assert_allclose(with_beam, no_beam, atol=1e-10)
 
 
@@ -444,7 +446,7 @@ def test_stokes_out_relabels_a_non_prefix_mueller():
     nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
 
     # a genuine (I, V) Mueller: plane 0 keeps I, plane 1 leaks some I into V
-    mueller = np.zeros((2, 1, nx, ny))
+    mueller = np.zeros((2, 1, ny, nx))
     mueller[0, 0] = 1.0
     mueller[1, 0] = 0.3
 
@@ -485,3 +487,34 @@ def test_stokes_out_rejects_length_mismatch():
             freq_out=freq[0],
             stokes_out="IQU",
         )
+
+
+def test_genesis_model_degrids_like_its_x_major_render():
+    """Pins orientation across the upgrade: a genesis .mds (x-major, non-square) must predict
+    exactly what degridding its own x-major render with ducc0 directly predicts."""
+    ds = genesis_dataset()
+    rng = np.random.default_rng(40)
+    uvw, chan = _uvw_freq(rng, nrow=300, nchan=2)
+    got = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=("XX",), time=0.0, freq_out=FREQS[2])
+    want = dirty2vis(
+        uvw=uvw,
+        freq=chan,
+        dirty=genesis_cube(FREQS[2:])[0],
+        pixsize_x=ds.attrs["cell_rad_x"],
+        pixsize_y=ds.attrs["cell_rad_y"],
+        center_x=0.0,
+        center_y=0.0,
+        flip_u=False,
+        flip_v=True,
+        flip_w=False,
+        epsilon=1e-7,
+        do_wgridding=True,
+        divide_by_n=False,
+        nthreads=1,
+    )
+    assert_allclose(got[..., 0], want, atol=1e-8)
+
+
+def test_model_geometry_rejects_a_newer_spec():
+    with pytest.raises(ValueError, match="needs pfb-model-spec"):
+        model_geometry(genesis_dataset(spec="9.9"))
