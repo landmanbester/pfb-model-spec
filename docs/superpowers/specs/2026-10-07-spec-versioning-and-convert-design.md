@@ -189,8 +189,10 @@ imports it only lazily.
   `convert`), with an actionable message.
 - A genesis dataset whose `stokes` attr names more than one product raises `ValueError` in the
   upgrade step.
-- `convert` exits with `typer.Exit(code=1)` and a message when the input and output paths are the
-  same, or when the output exists without `--overwrite`.
+- `core.convert` raises `ValueError` when the input and output paths are the same (compared after
+  normalisation: relative vs absolute, trailing slash, remote protocol), or when the output exists
+  without `--overwrite`. It raises from `core`, the same way `model2comps` does, because the
+  generated `cli/` wrapper must round-trip byte-identically and so carries no custom code.
 - Shape mismatches in `fit_image_cube` (`wgt` vs `image`) raise `ValueError`.
 
 ## Testing
@@ -224,8 +226,8 @@ All synthetic, with no MS; they run with `uv run --extra full pytest`.
   shapes and the 0.1 schema; degrid gives the same visibilities from a genesis input and from its
   0.1 conversion.
 - **`tests/test_roundtrip.py`**: add a `convert` case.
-- **`tests/_synth.py`**: gains a Stokes axis and `(Y, X)` order. It is test-only, so the
-  "don't restyle" rule does not block a deliberate spec-driven change.
+- **`tests/_synth.py`**: unchanged. Its helpers (`gaussian2d`, `give_edges`) have no axis
+  semantics; tests build x-major Gaussians as before and transpose to `(Y, X)` explicitly.
 
 ## Docs
 
