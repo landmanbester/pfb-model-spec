@@ -55,3 +55,8 @@ def _assert_roundtrip(command_name: str) -> None:
 def test_roundtrip_model2comps() -> None:
     """The model2comps command must round-trip cleanly through a cab."""
     _assert_roundtrip("model2comps")
+
+
+def test_roundtrip_convert() -> None:
+    """The convert command must round-trip cleanly through a cab."""
+    _assert_roundtrip("convert")

@@ -31,6 +31,7 @@ dependencies = [
 full = [
     "astropy",
     "ducc0",
+    "hip-cargo[gcs,s3]>=0.4.0",
     "numpy",
     "scipy",
     "sympy",

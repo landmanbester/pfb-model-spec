@@ -8,8 +8,8 @@ stack (numpy / xarray / astropy) plus this package's own spec library -- it has 
 dependency on pfb-imaging and no `.dds`/daskms coupling (the legacy `.dds`-input path was
 dropped in the migration; deconvolvers write `.mds` directly via ``io.model_to_ds``).
 
-Axis convention: the `.mds` spec is x-major `(nband, nx, ny)`. WSClean FITS data is
-row-major `(ny, nx)`, so each plane is transposed on read.
+Axis convention: spec 0.1 is `(Y, X)` like FITS, so WSClean planes are used as read --
+`(nband, ny, nx)` -- with a length-1 Stokes axis added for the fit. No transpose.
 """
 
 import logging
@@ -35,7 +35,7 @@ def read_wsclean_model(from_fits: str) -> dict:
             ``{from_fits}-[0-9][0-9][0-9][0-9]-model.fits`` selects the per-band planes.
 
     Returns:
-        Dict with ``model`` (x-major `(nband, nx, ny)`), ``freqs`` (`(nband,)` Hz),
+        Dict with ``model`` (`(nband, ny, nx)`), ``freqs`` (`(nband,)` Hz),
         ``wsums`` (`(nband,)`), ``cell_deg``, ``nx``, ``ny``, ``ra``/``dec`` (radians).
 
     Raises:
@@ -53,7 +53,7 @@ def read_wsclean_model(from_fits: str) -> dict:
         log.info(f"Loading {image}")
         with fits.open(image) as hdu:
             hdr = hdu[0].header
-            planes.append(hdu[0].data.squeeze().T)  # (ny, nx) row-major -> (nx, ny) x-major
+            planes.append(hdu[0].data.squeeze())  # (ny, nx), FITS row-major
             freqs.append(hdr["CRVAL3"])
             if "WSCVWSUM" in hdr:
                 wsums.append(hdr["WSCVWSUM"])
@@ -126,7 +126,7 @@ def model2comps(
         model_out: Explicit `.mds` path, overriding the derived name.
         out_freqs: ``flow:fhigh:step`` (Hz) to render the model FITS onto; renders
             at the input band frequencies when omitted.
-        product: Stokes/correlation product recorded in the `.mds`.
+        product: single Stokes parameter (I, Q, U or V) recorded in the `.mds`.
         fits_output_folder: Directory for the rendered model FITS (cwd if omitted).
 
     Raises:
@@ -135,6 +135,8 @@ def model2comps(
     """
     if not log.handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
+    if product not in ("I", "Q", "U", "V"):
+        raise ValueError(f"product must be a single Stokes parameter (I, Q, U or V), got {product!r}")
 
     coeff_name = model_out or f"{output_filename}_{product}_{suffix}_{model_name.lower()}.mds"
     fits_dir = fits_output_folder or os.path.dirname(coeff_name) or "."
@@ -148,7 +150,7 @@ def model2comps(
             raise ValueError(f"{coeff_name} exists. Set overwrite=True to replace it.")
 
     cube = read_wsclean_model(from_fits)
-    model = cube["model"]  # (nband, nx, ny)
+    model = cube["model"]  # (nband, ny, nx)
     mfreqs = cube["freqs"]
     wsums = cube["wsums"]
     nx, ny = cube["nx"], cube["ny"]
@@ -178,11 +180,11 @@ def model2comps(
 
     log.info(f"Fitting {nband} bands with {nbasisf} basis functions")
     try:
-        coeffs, x_index, y_index, expr, params, texpr, fexpr = fit_image_cube(
+        coeffs, y_index, x_index, expr, params, texpr, fexpr = fit_image_cube(
             time,
             mfreqs[fsel],
-            model[None, fsel],
-            wgt=wsums[None, fsel],
+            model[None, fsel, None],
+            wgt=wsums[None, fsel, None],
             nbasisf=nbasisf,
             method=fit_mode,
             sigmasq=sigmasq,
@@ -192,8 +194,8 @@ def model2comps(
 
     coeff_dataset = build_mds_dataset(
         coeffs,
-        x_index,
         y_index,
+        x_index,
         expr,
         params,
         texpr,
@@ -209,7 +211,7 @@ def model2comps(
         flip_v,
         flip_w,
         radec,
-        product,
+        [product],
         __version__,
     )
     log.info(f"Writing component model to {coeff_name}")
@@ -218,13 +220,13 @@ def model2comps(
     # re-render at the input bands to report the fit's interpolation error
     modelo = np.stack(
         [
-            _render(coeffs, x_index, y_index, expr, params, texpr, fexpr, time[0], mfreqs[b], nx, ny, cell_rad, x0, y0)
+            _render(coeffs, y_index, x_index, expr, params, texpr, fexpr, time[0], mfreqs[b], nx, ny, cell_rad, x0, y0)
             for b in range(nband)
         ]
     )
     denom = np.linalg.norm(model.ravel())
     if denom > 0:
-        log.info(f"Fractional interpolation error is {np.linalg.norm((modelo - model).ravel()) / denom:.3e}")
+        log.info(f"Fractional interpolation error is {np.linalg.norm((modelo[:, 0] - model).ravel()) / denom:.3e}")
 
     # optional rendered model FITS (a sanity check on the fit)
     if out_freqs is not None:
@@ -233,7 +235,7 @@ def model2comps(
         log.info(f"Rendering model cube to {freq_out.size} output bands")
         modelo = np.stack(
             [
-                _render(coeffs, x_index, y_index, expr, params, texpr, fexpr, time[0], f, nx, ny, cell_rad, x0, y0)
+                _render(coeffs, y_index, x_index, expr, params, texpr, fexpr, time[0], f, nx, ny, cell_rad, x0, y0)
                 for f in freq_out
             ]
         )
@@ -243,35 +245,31 @@ def model2comps(
     hdr = set_wcs(cell_deg, cell_deg, nx, ny, radec, freq_out, unit="Jy/pixel")
     os.makedirs(fits_dir, exist_ok=True)
     log.info(f"Writing rendered model to {fits_name}")
-    save_fits(modelo[:, None, :, :], fits_name, hdr, overwrite=overwrite)
+    save_fits(modelo, fits_name, hdr, overwrite=overwrite, yx_order=True)
 
 
-def _render(coeffs, x_index, y_index, expr, params, texpr, fexpr, t, f, nx, ny, cell_rad, x0, y0):
-    """Render coefficients to a single `(nx, ny)` slice at time ``t``, frequency ``f``.
+def _render(coeffs, y_index, x_index, expr, params, texpr, fexpr, t, f, nx, ny, cell_rad, x0, y0):
+    """Render coefficients to a ``(nstokes, ny, nx)`` slice at time ``t``, frequency ``f``.
 
-    Output grid matches the fit grid (same npix/cell/centre), so this is the
-    identity resample used for the interpolation-error and sanity-FITS renders.
+    The output grid matches the fit grid (same npix/cell/centre), so this is the identity
+    resample used for the interpolation-error and sanity-FITS renders.
     """
+    geometry = dict(nxi=nx, nyi=ny, cellxi=cell_rad, cellyi=cell_rad, x0i=x0, y0i=y0)
     return eval_coeffs_to_slice(
         t,
         f,
         coeffs,
-        x_index,
         y_index,
+        x_index,
         expr,
         params,
         texpr,
         fexpr,
-        nx,
-        ny,
-        cell_rad,
-        cell_rad,
-        x0,
-        y0,
-        nx,
-        ny,
-        cell_rad,
-        cell_rad,
-        x0,
-        y0,
+        **geometry,
+        nxo=nx,
+        nyo=ny,
+        cellxo=cell_rad,
+        cellyo=cell_rad,
+        x0o=x0,
+        y0o=y0,
     )

@@ -5,10 +5,10 @@ chunking, distribution and I/O belong to the calling application
 (pfb-imaging's `degrid-msv4`, QuartiCal's predict); this module only turns a
 model plus a chunk's `(uvw, freq)` into visibilities.
 
-Axis convention: **x-major**, `(nx, ny)`, matching the `genesis` `.mds` spec and
-ducc0's `dirty2vis`. See `.claude/rules/component-model.md` -> "Axis
-convention": this library deliberately does not transpose to pfb-imaging's
-`(Y, X)` raster convention, so no transpose appears anywhere below.
+Axis convention: images are `(nstokes, ny, nx)`, the spec 0.1 / FITS order. ducc0's
+`dirty2vis` is x-major, so :func:`degrid_stokes` transposes exactly once, right before the
+gridder call; nothing else here transposes. Visibilities have no orientation, so a caller
+of the fused wrapper never transposes at all.
 """
 
 from collections.abc import Sequence
@@ -19,6 +19,7 @@ import xarray as xr
 from ducc0.wgridder.experimental import dirty2vis
 
 from pfb_model_spec.utils.modelspec import eval_coeffs_to_slice
+from pfb_model_spec.utils.spec import upgrade
 
 # Stokes -> correlation expressions, matching africanus.model.coherency.convert
 # (verified elementwise; africanus is deliberately not a dependency here because
@@ -33,11 +34,6 @@ _STOKES_TO_CORR: dict[str, dict[str, complex]] = {
     "LR": {"Q": 1.0 + 0j, "U": -1.0j},
     "LL": {"I": 1.0 + 0j, "V": -1.0 + 0j},
 }
-
-# .mds spec versions this module understands. A new spec (e.g. the (Y, X) +
-# stokes-axis revision, issues #19/#20) must be added here deliberately, not
-# silently accepted -- the axis order and the stokes axis both change meaning.
-_SUPPORTED_SPECS = frozenset({"genesis"})
 
 
 def stokes_vis_to_corr(
@@ -114,8 +110,8 @@ def degrid_stokes(
             NaN where the caller's data layout pads absent samples; pass
             ``mask`` to exclude them.
         freq: Channel frequencies in Hz, shape ``(nchan,)``.
-        stokes_image: Model image per Stokes plane, shape ``(nstokes, nx, ny)``,
-            x-major (see the module docstring).
+        stokes_image: Model image per Stokes plane, shape ``(nstokes, ny, nx)``
+            (see the module docstring).
         cell_rad: Pixel size in radians (square pixels).
         x0: Phase-centre x offset from ``wgridder_conventions``.
         y0: Phase-centre y offset from ``wgridder_conventions``.
@@ -143,7 +139,7 @@ def degrid_stokes(
         out[s] = dirty2vis(
             uvw=uvw,
             freq=freq,
-            dirty=stokes_image[s],
+            dirty=np.ascontiguousarray(stokes_image[s].T),  # (ny, nx) -> ducc0's x-major (nx, ny)
             mask=mask,
             pixsize_x=cell_rad,
             pixsize_y=cell_rad,
@@ -171,18 +167,14 @@ def model_geometry(model_ds: xr.Dataset) -> dict[str, Any]:
 
     Returns:
         ``{"nx", "ny", "cell_rad", "x0", "y0", "flip_u", "flip_v", "flip_w",
-        "stokes"}``.
+        "stokes"}``; ``stokes`` is a list of Stokes labels.
 
     Raises:
-        ValueError: If the `.mds` declares a spec this module does not know,
-            or if the pixels are not square, since ``degrid_stokes`` takes a
-            single ``cell_rad``.
+        ValueError: If the `.mds` spec is unknown or newer (from `upgrade`), or if the
+            pixels are not square, since ``degrid_stokes`` takes a single ``cell_rad``.
     """
-    a = model_ds.attrs
-    spec = str(a.get("spec", "genesis"))
-    if spec not in _SUPPORTED_SPECS:
-        raise ValueError(f"Unsupported .mds spec {spec!r}; this module understands {sorted(_SUPPORTED_SPECS)}")
-
+    ds = upgrade(model_ds)
+    a = ds.attrs
     cell_x = float(a["cell_rad_x"])
     cell_y = float(a["cell_rad_y"])
     if cell_x != cell_y:
@@ -199,7 +191,7 @@ def model_geometry(model_ds: xr.Dataset) -> dict[str, Any]:
         "flip_u": bool(a["flip_u"]),
         "flip_v": bool(a["flip_v"]),
         "flip_w": bool(a["flip_w"]),
-        "stokes": str(a["stokes"]),
+        "stokes": [str(s) for s in ds.stokes.values],
     }
 
 
@@ -242,18 +234,14 @@ def render_model_region(
         y0: Output phase-centre y offset. Defaults to the model's ``center_y``.
 
     Returns:
-        The rendered image, shape ``(nstokes, nx, ny)``, x-major. ``nstokes``
-        is 1 for the ``genesis`` spec, which carries a single Stokes product;
-        the axis is present so that adding a Stokes axis (#19) changes values
-        rather than shapes.
+        The rendered image, shape ``(nstokes, ny, nx)``, one plane per entry of
+        the `.mds` ``stokes`` coord.
 
     Raises:
-        ValueError: If the `.mds` declares a spec this module does not know.
+        ValueError: If the `.mds` spec is unknown or newer (from `upgrade`).
     """
-    a = model_ds.attrs
-    spec = str(a.get("spec", "genesis"))
-    if spec not in _SUPPORTED_SPECS:
-        raise ValueError(f"Unsupported .mds spec {spec!r}; this module understands {sorted(_SUPPORTED_SPECS)}")
+    ds = upgrade(model_ds)
+    a = ds.attrs
 
     nxi, nyi = int(a["npix_x"]), int(a["npix_y"])
     cellxi, cellyi = float(a["cell_rad_x"]), float(a["cell_rad_y"])
@@ -266,31 +254,29 @@ def render_model_region(
     x0o = x0i if x0 is None else float(x0)
     y0o = y0i if y0 is None else float(y0)
 
-    image = eval_coeffs_to_slice(
+    return eval_coeffs_to_slice(
         time,
         freq_out,
-        model_ds.coefficients.values,
-        model_ds.location_x.values,
-        model_ds.location_y.values,
+        ds.coefficients.values,
+        ds.location_y.values,
+        ds.location_x.values,
         a["parametrisation"],
-        model_ds.params.values,
+        ds.params.values,
         a["texpr"],
         a["fexpr"],
-        nxi,
-        nyi,
-        cellxi,
-        cellyi,
-        x0i,
-        y0i,
-        nxo,
-        nyo,
-        cellxo,
-        cellyo,
-        x0o,
-        y0o,
+        nxi=nxi,
+        nyi=nyi,
+        cellxi=cellxi,
+        cellyi=cellyi,
+        x0i=x0i,
+        y0i=y0i,
+        nxo=nxo,
+        nyo=nyo,
+        cellxo=cellxo,
+        cellyo=cellyo,
+        x0o=x0o,
+        y0o=y0o,
     )
-    # leading stokes axis: 1 for genesis, which stores a single product
-    return image[None]
 
 
 def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
@@ -304,18 +290,18 @@ def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
     leave ``divide_by_n=False`` in :func:`degrid_stokes`.
 
     Args:
-        stokes_image: Intrinsic model, shape ``(nstokes_in, nx, ny)``.
-        mueller: Real Mueller block, shape ``(nstokes_out, nstokes_in, nx, ny)``
+        stokes_image: Intrinsic model, shape ``(nstokes_in, ny, nx)``.
+        mueller: Real Mueller block, shape ``(nstokes_out, nstokes_in, ny, nx)``
             on the same grid as ``stokes_image``.
 
     Returns:
-        The apparent model, shape ``(nstokes_out, nx, ny)``.
+        The apparent model, shape ``(nstokes_out, ny, nx)``.
 
     Raises:
         ValueError: If the Stokes axes or the image grids disagree.
     """
     if mueller.ndim != 4:
-        raise ValueError(f"mueller must be 4-D (nso, nsi, nx, ny), got {mueller.shape}")
+        raise ValueError(f"mueller must be 4-D (nso, nsi, ny, nx), got {mueller.shape}")
     if mueller.shape[1] != stokes_image.shape[0]:
         raise ValueError(
             f"mueller input axis {mueller.shape[1]} does not match the model's {stokes_image.shape[0]} Stokes planes"
@@ -364,20 +350,20 @@ def model_to_apparent_vis_for_region(
             the unweighted mean of its frequency axis. May lie between the
             bands the model was fitted at.
         mueller: Optional Stokes-basis Mueller block on the model grid, shape
-            ``(nstokes_out, nstokes_in, nx, ny)``.
+            ``(nstokes_out, nstokes_in, ny, nx)``.
         stokes_out: Optional Stokes products of the planes being degridded (the
             rendered image after ``mueller``, if any, has been applied), in
             that axis's order, e.g. ``"IV"``. Passed as the ``stokes_in``
             argument to :func:`stokes_vis_to_corr`. When ``None`` (the
             default): if no Mueller was applied, the model's own ``stokes``
-            attr is used; if a Mueller was applied, the planes are *assumed*
+            coord is used; if a Mueller was applied, the planes are *assumed*
             to be an ``"IQUV"`` prefix of length ``nstokes_out`` -- this
             assumption is wrong whenever the Mueller's output axis is not such
             a prefix (e.g. a 2-plane (I, V) Mueller, mislabelled ``"IQ"`` by
             the default), so pass ``stokes_out`` explicitly in that case.
         mask: Optional ``(nrow, nchan)`` visibility mask; zero entries are not
             degridded and come back as exactly zero.
-        region_mask: Optional ``(nx, ny)`` image mask applied to the rendered
+        region_mask: Optional ``(ny, nx)`` image mask applied to the rendered
             model, for degridding a sub-region into its own column.
         epsilon: Gridder accuracy.
         do_wgridding: Perform w-correction via improved w-stacking.
@@ -392,11 +378,12 @@ def model_to_apparent_vis_for_region(
             if ``stokes_out``'s length does not match the number of image
             planes being degridded, or if the composed primitives raise
             ValueError: non-square pixels from :func:`model_geometry`, an
-            unsupported ``.mds`` spec from :func:`model_geometry` or
+            unknown or newer ``.mds`` spec from :func:`model_geometry` or
             :func:`render_model_region`, a Mueller shape mismatch from
             :func:`apply_mueller`, or an unsupported correlation from
             :func:`stokes_vis_to_corr`.
     """
+    model_ds = upgrade(model_ds)  # once, so the two readers below need not repeat it
     geom = model_geometry(model_ds)
     image = render_model_region(model_ds, time=time, freq_out=freq_out)
     stokes_in = geom["stokes"]

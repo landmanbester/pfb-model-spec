@@ -13,6 +13,9 @@ release.
   Plain `uv run pytest` may omit the extra and the modelspec test will fail on `import numpy`.
 - `tests/test_roundtrip.py` guards that each `cli/<cmd>.py` round-trips through its generated cab
   (`generate-cabs` → `generate-function`) byte-identically. Add a case per new command.
+- `tests/test_spec.py` guards that `SPEC_VERSION` is not behind the package `major.minor`.
+- `tests/_genesis.py` is a frozen fixture (the genesis writer) and must never be updated to follow
+  the library.
 - `tests/test_lightweight_import.py` guards that `import pfb_model_spec` does **not** import
   `modelspec` (keeps the lightweight install intact).
 
@@ -59,6 +62,9 @@ uv run tbump <version>      # e.g. uv run tbump 0.0.1
 regenerates the changelog (`git-cliff` → `CHANGELOG.md` per `cliff.toml`), rewrites the image tag to
 the version, regenerates cabs, commits, tags `v<version>`, and pushes; the tag triggers
 `publish.yml` and `publish-container.yml`.
+
+`tbump` to a new minor version fails CI until a spec step (possibly a no-op) is added to
+`utils/spec.py`; schema changes ship only in a new minor release.
 
 **Release ordering:** after merging a PR to `main`, let `update-cabs.yml` finish (it pushes a
 `[skip checks]` commit), then `git checkout main && git pull` and confirm a clean tree **before**

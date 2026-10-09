@@ -20,4 +20,8 @@ from pfb_model_spec.cli.model2comps import model2comps  # noqa: E402
 
 app.command(name="model2comps")(model2comps)
 
+from pfb_model_spec.cli.convert import convert  # noqa: E402
+
+app.command(name="convert")(convert)
+
 __all__ = ["app"]

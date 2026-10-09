@@ -1,247 +1,147 @@
+from collections.abc import Callable
+
 import numpy as np
 import sympy as sm
-import xarray as xr
 from scipy.interpolate import RegularGridInterpolator
 from sympy.parsing.sympy_parser import parse_expr
 from sympy.utilities.lambdify import lambdify
 
-specs = ["genesis", "exodus"]
+from pfb_model_spec.utils.spec import open_mds
+
+
+def _scale(x: np.ndarray, sym: sm.Symbol, method: str) -> tuple[np.ndarray, sm.Expr]:
+    """Map an axis onto the fit domain, returning ``(scaled values, sympy scaling expr)``.
+
+    A length-1 axis is left unscaled: only the constant basis function can be fitted to
+    it, so any scaling is irrelevant -- and ``x / x[0]`` would divide by zero at t=0.
+    """
+    if x.size == 1:
+        return x.astype(float), sym
+    if method == "poly":
+        return x / x[0], sym / x[0]
+    # Legendre: scale onto [-1, 1] for stability
+    centre = (x.max() + x.min()) / 2
+    half = (x - centre).max()
+    return (x - centre) / half, (sym - centre) / half
 
 
 def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, method="poly", sigmasq=0):
+    """Fit the time and frequency axes of a multi-Stokes image cube.
+
+    The basis is additive: functions of time (including the constant) plus functions of
+    frequency (excluding the constant). Every Stokes plane is fitted separately against the
+    same basis, and all planes share one set of component locations: the pixels that are
+    non-zero in any plane.
+
+    Args:
+        time: Time axis, shape ``(ntime,)``.
+        freq: Frequency axis, shape ``(nband,)``.
+        image: Pixelated cube, shape ``(ntime, nband, nstokes, ny, nx)``.
+        wgt: Optional weights, shape ``(ntime, nband, nstokes)``.
+        nbasist: Number of time basis functions (default ``ntime``).
+        nbasisf: Number of frequency basis functions, counting the shared constant
+            (default ``nband``).
+        method: ``"poly"`` (monomials) or ``"Legendre"``.
+        sigmasq: Ridge term added to the Hessian; ignored when ``ntime == nband == 1``
+            (nothing to fit: the data are the coefficients, whatever the weights).
+
+    Returns:
+        ``(coeffs, y_index, x_index, expr, params, texpr, fexpr)``:
+        - ``coeffs`` has shape ``(nstokes, npar, ncomps)``;
+        - ``y_index``/``x_index`` are the component pixel locations, in array-axis order;
+        - ``expr`` is the stringified sympy model in ``t``, ``f`` and ``params``;
+        - ``texpr``/``fexpr`` map raw time/frequency onto the fit domain.
+
+    Raises:
+        ValueError: On inconsistent shapes or basis sizes.
+        NotImplementedError: For an unknown ``method``.
     """
-    Fit the time and frequency axes of an image cube where
+    from sympy.abc import f, t
 
-    time    - (ntime) time axis
-    freq    - (nband) frequency axis
-    image   - (ntime, nband, nx, ny) pixelated image
-    wgt     - (ntime, nband) optional per time and frequency weights
-    nbasist - number of time basis functions
-    nbasisf - number of frequency basis functions
-    method  - method to use for fitting (poly or Legendre)
-    sigmasq - optional regularisation term to add to the Hessian
-              to improve conditioning
+    if image.ndim != 5:
+        raise ValueError(f"image must be (ntime, nband, nstokes, ny, nx), got shape {image.shape}")
+    ntime, nband, nstokes, ny, nx = image.shape
+    if time.size != ntime or freq.size != nband:
+        raise ValueError(f"time/freq sizes ({time.size}, {freq.size}) do not match image {image.shape}")
+    if wgt is None:
+        wgt = np.ones((ntime, nband, nstokes), dtype=float)
+    elif wgt.shape != (ntime, nband, nstokes):
+        raise ValueError(f"wgt must have shape {(ntime, nband, nstokes)}, got {wgt.shape}")
+    nbasist = ntime if nbasist is None else nbasist
+    nbasisf = nband if nbasisf is None else nbasisf
+    if not 1 <= nbasist <= ntime or not 1 <= nbasisf <= nband:
+        raise ValueError(f"need 1 <= nbasist <= {ntime} and 1 <= nbasisf <= {nband}")
 
-    method:
-    poly     - fit a monomials in time and frequency
-    Legendre - fit a Legendre polynomial in time and frequency
+    if method == "poly":
 
-    returns:
-    coeffs  - fitted coefficients
-    x_index, y_index  - pixel locations of non-zero pixels in the image
-    expr    - a string representing the symbolic expression describing the fit
-    params  - tuple of str, parameters to pass into function (excluding t and f)
-    tfunc   - function which scales the time domain appropriately for method
-    ffunc   - function which scales the frequency domain appropriately for method
-
-
-    The fit is performed in scaled coordinates (t=time/ref_time,f=freq/ref_freq)
-    """
-    ntime = time.size
-    nband = freq.size
-    ref_time = time[0]
-    ref_freq = freq[0]
-    import sympy as sm
-    from sympy.abc import a, f, t
-
-    if nbasist is None:
-        nbasist = ntime
-    else:
-        assert nbasist <= ntime
-    if nbasisf is None:
-        nbasisf = nband
-    else:
-        assert nbasisf <= nband
-
-    mask = np.any(image, axis=(0, 1))  # over t and f axes
-    x_index, y_index = np.where(mask)
-    ncomps = x_index.size
-
-    # components excluding zeros
-    beta = image[:, :, x_index, y_index].reshape(ntime * nband, ncomps)
-    if wgt is not None:
-        wgt = wgt.reshape(ntime * nband, 1)
-    else:
-        wgt = np.ones((ntime * nband, 1), dtype=float)
-
-    # nothing to fit
-    if ntime == 1 and nband == 1:
-        coeffs = beta
-        expr = a
-        params = (a,)
-    elif method == "poly":
-        wt = time / ref_time
-        tfunc = t / ref_time
-        xfit = np.tile(wt[:, None], (nband, nbasist)) ** np.arange(nbasist)
-        params = sm.symbols(f"t(0:{nbasist})")
-        expr = sum(co * t**i for i, co in enumerate(params))
-        # the costant offset will always be included since nbasist is at least one
-        if nband > 1:
-            wf = freq / ref_freq
-            ffunc = f / ref_freq
-            xf = np.tile(wf[:, None], (ntime, nbasisf - 1)) ** np.arange(1, nbasisf)
-            xfit = np.hstack((xfit, xf))
-            paramsf = sm.symbols(f"f(1:{nbasisf})")
-            expr += sum(co * f ** (i + 1) for i, co in enumerate(paramsf))
-            params += paramsf
+        def basis(i, w, sym):
+            return w**i, sym**i
 
     elif method == "Legendre":
-        # scale to lie between -1,1 for stability
-        if ntime > 1:
-            tmax = time.max()
-            tmin = time.min()
-            wt = time - (tmax + tmin) / 2
-            wtmax = wt.max()
-            wt /= wtmax
-            # function to convert time to interp domain
-            tfunc = (t - (tmax + tmin) / 2) / wtmax
-        else:
-            wt = time
-            tfunc = t
-        xt = np.zeros((ntime, nbasist), dtype=float)
-        params = sm.symbols(f"t(0:{nbasist})")
-        if nbasist > 1:
-            expr = 0
-            for i in range(nbasist):
-                vals = np.polynomial.Legendre.basis(i)(wt)
-                xt[:, i] = vals
-                expr += sm.polys.orthopolys.legendre_poly(i, t) * params[i]
-        else:
-            xt[...] = 1.0
-            expr = params[0]
-        xfit = np.tile(xt, (nband, 1))
-        paramsf = sm.symbols(f"f(1:{nbasisf})")
-        if nband > 1:
-            xf = np.zeros((nband, nbasisf - 1))
-            fmax = freq.max()
-            fmin = freq.min()
-            wf = freq - (fmax + fmin) / 2
-            wfmax = wf.max()
-            wf /= wfmax
-            ffunc = (f - (fmax + fmin) / 2) / wfmax
-            for i in range(1, nbasisf):
-                vals = np.polynomial.Legendre.basis(i)(wf)
-                xf[:, i - 1] = vals
-                expr += sm.polys.orthopolys.legendre_poly(i, f) * paramsf[i - 1]
-            xf = np.tile(xf, (ntime, 1))
-            xfit = np.hstack((xfit, xf))
-            params += paramsf
+
+        def basis(i, w, sym):
+            return np.polynomial.Legendre.basis(i)(w), sm.polys.orthopolys.legendre_poly(i, sym)
+
     else:
         raise NotImplementedError(f"Method {method} not implemented")
 
-    dirty_coeffs = xfit.T.dot(wgt * beta)
-    hess_coeffs = xfit.T.dot(wgt * xfit)
-    # to improve conditioning
-    if sigmasq:
-        hess_coeffs += sigmasq * np.eye(hess_coeffs.shape[0])
-    coeffs = np.linalg.solve(hess_coeffs, dirty_coeffs)
+    wt, tfunc = _scale(time, t, method)
+    wf, ffunc = _scale(freq, f, method)
+    tparams = sm.symbols(f"t(0:{nbasist})")
+    fparams = sm.symbols(f"f(1:{nbasisf})") if nbasisf > 1 else ()
 
-    return coeffs, x_index, y_index, str(expr), list(map(str, params)), str(tfunc), str(ffunc)
+    expr = sm.Integer(0)
+    xt = np.zeros((ntime, nbasist))
+    for i, p in enumerate(tparams):
+        xt[:, i], term = basis(i, wt, t)
+        expr += term * p
+    xf = np.zeros((nband, nbasisf - 1))
+    for i, p in enumerate(fparams, start=1):
+        xf[:, i - 1], term = basis(i, wf, f)
+        expr += term * p
+    # rows ordered (time, band), matching the C-order reshape of beta below
+    xfit = np.hstack((np.repeat(xt, nband, axis=0), np.tile(xf, (ntime, 1))))
 
+    mask = np.any(image, axis=(0, 1, 2))
+    y_index, x_index = np.where(mask)
+    beta = image[:, :, :, y_index, x_index].reshape(ntime * nband, nstokes, y_index.size)
+    wgt = wgt.reshape(ntime * nband, nstokes)
 
-def fit_image_fscube(freq, image, wgt=None, nbasisf=None, method="Legendre", sigmasq=0):
-    """
-    Fit the frequency axis of an image cube where
-
-    freq    - (nband,) frequency axis
-    image   - (nband, ncorr, nx, ny) pixelated image
-    wgt     - (nband, ncorr) optional per time and frequency weights
-    nbasisf - number of frequency basis functions
-    method  - method to use for fitting (poly or Legendre)
-    sigmasq - optional regularisation term to add to the Hessian
-              to improve conditioning
-
-    method:
-    poly     - fit a monomials to frequency axis
-    Legendre - fit a Legendre polynomial to frequency
-
-    returns:
-    coeffs  - (ncorr, nbasisf, ncomps) fitted coefficients
-    x_index, y_index  - (ncomps,) pixel locations of non-zero pixels in the image
-    expr    - a string representing the symbolic expression describing the fit
-    params  - tuple of str, parameters to pass into function (excluding t and f)
-    ffunc   - function which scales the frequency domain appropriately for method
-    """
-    nband = freq.size
-    ref_freq = freq[0]
-    import sympy as sm
-    from sympy.abc import f
-
-    if nbasisf is None:
-        nbasisf = nband
-    else:
-        assert nbasisf <= nband
-
-    nband, ncorr, nx, ny = image.shape
-    mask = np.any(image, axis=(0, 1))  # over freq and corr axes
-    x_index, y_index = np.where(mask)
-    ncomps = x_index.size
-
-    # components excluding zeros
-    beta = image[:, :, x_index, y_index].reshape(nband, ncorr, ncomps)
-    if wgt is not None:
-        wgt = wgt.reshape(nband, ncorr, 1)
-    else:
-        wgt = np.ones((nband, ncorr, 1), dtype=float)
-
-    params = sm.symbols(f"f(0:{nbasisf})")
-    if nband == 1:  # nothing to fit
-        coeffs = beta
-        expr = f
-        params = (f,)
-    elif method == "poly":
-        wf = freq / ref_freq
-        ffunc = f / ref_freq
-        xf = np.tile(wf[:, None], (1, nbasisf)) ** np.arange(nbasisf)
-        expr = sum(co * f**i for i, co in enumerate(params))
-
-    elif method == "Legendre":
-        xf = np.zeros((nband, nbasisf), dtype=float)
-        fmax = freq.max()
-        fmin = freq.min()
-        wf = freq - (fmax + fmin) / 2
-        wfmax = wf.max()
-        wf /= wfmax
-        ffunc = (f - (fmax + fmin) / 2) / wfmax
-        xf[:, 0] = 1.0
-        expr = params[0]
-        for i in range(1, nbasisf):
-            vals = np.polynomial.Legendre.basis(i)(wf)
-            xf[:, i] = vals
-            expr += sm.polys.orthopolys.legendre_poly(i, f) * params[i]
-    else:
-        raise NotImplementedError(f"Method {method} not implemented")
-
-    # fit each correlation separately
-    coeffs = np.zeros((ncorr, nbasisf, ncomps), dtype=beta.dtype)
-    for c in range(ncorr):
-        dirty_coeffs = xf.T.dot(wgt[:, c] * beta[:, c])
-        hess_coeffs = xf.T.dot(wgt[:, c] * xf)
-        # to improve conditioning
+    coeffs = np.zeros((nstokes, xfit.shape[1], y_index.size), dtype=np.result_type(beta.dtype, float))
+    for s in range(nstokes):
+        if ntime == 1 and nband == 1:
+            # nothing to fit (the basis is the constant 1); a zero weight would make it singular
+            coeffs[s] = beta[:, s]
+            continue
+        w = wgt[:, s : s + 1]
+        hess = xfit.T.dot(w * xfit)
         if sigmasq:
-            hess_coeffs += sigmasq * np.eye(hess_coeffs.shape[0])
-        coeffs[c] = np.linalg.solve(hess_coeffs, dirty_coeffs)
+            hess += sigmasq * np.eye(hess.shape[0])
+        coeffs[s] = np.linalg.solve(hess, xfit.T.dot(w * beta[:, s]))
 
-    return coeffs, x_index, y_index, str(expr), list(map(str, params)), str(ffunc)
+    params = [*tparams, *fparams]
+    return coeffs, y_index, x_index, str(expr), [str(p) for p in params], str(tfunc), str(ffunc)
 
 
-def eval_coeffs_to_cube(time, freq, nx, ny, coeffs, x_index, y_index, expr, paramf, texpr, fexpr):
-    ntime = time.size
-    nfreq = freq.size
-
-    image = np.zeros((ntime, nfreq, nx, ny), dtype=float)
+def _model_functions(expr: str, paramf: list[str], texpr: str, fexpr: str) -> tuple[Callable, Callable, Callable]:
+    """Lambdify a stored parametrisation into ``(modelf, tfunc, ffunc)``."""
     params = sm.symbols(("t", "f"))
     params += sm.symbols(tuple(paramf))
-    symexpr = parse_expr(expr)
-    modelf = lambdify(params, symexpr)
-    texpr = parse_expr(texpr)
-    tfunc = lambdify(params[0], texpr)
-    fexpr = parse_expr(fexpr)
-    ffunc = lambdify(params[1], fexpr)
+    modelf = lambdify(params, parse_expr(expr))
+    tfunc = lambdify(params[0], parse_expr(texpr))
+    ffunc = lambdify(params[1], parse_expr(fexpr))
+    return modelf, tfunc, ffunc
+
+
+def eval_coeffs_to_cube(time, freq, nx, ny, coeffs, y_index, x_index, expr, paramf, texpr, fexpr):
+    """Render ``(nstokes, npar, ncomps)`` coefficients to a ``(ntime, nfreq, nstokes, ny, nx)`` cube."""
+    modelf, tfunc, ffunc = _model_functions(expr, paramf, texpr, fexpr)
+    nstokes = coeffs.shape[0]
+    image = np.zeros((time.size, freq.size, nstokes, ny, nx), dtype=float)
     for i, tval in enumerate(time):
         for j, fval in enumerate(freq):
-            image[i, j, x_index, y_index] = modelf(tfunc(tval), ffunc(fval), *coeffs)
-
+            for s in range(nstokes):
+                image[i, j, s, y_index, x_index] = modelf(tfunc(tval), ffunc(fval), *coeffs[s])
     return image
 
 
@@ -249,12 +149,13 @@ def eval_coeffs_to_slice(
     time,
     freq,
     coeffs,
-    x_index,
     y_index,
+    x_index,
     expr,
     paramf,
     texpr,
     fexpr,
+    *,
     nxi,
     nyi,
     cellxi,
@@ -268,17 +169,38 @@ def eval_coeffs_to_slice(
     x0o,
     y0o,
 ):
-    image_in = np.zeros((nxi, nyi), dtype=float)
-    params = sm.symbols(("t", "f"))
-    params += sm.symbols(tuple(paramf))
-    symexpr = parse_expr(expr)
-    modelf = lambdify(params, symexpr)
-    texpr = parse_expr(texpr)
-    tfunc = lambdify(params[0], texpr)
-    fexpr = parse_expr(fexpr)
-    ffunc = lambdify(params[1], fexpr)
-    image_in[x_index, y_index] = modelf(tfunc(time), ffunc(freq), *coeffs)
+    """Render coefficients at one (time, freq) onto an arbitrary output grid.
 
+    Returns ``(nstokes, nyo, nxo)``. The geometry is keyword-only so that a call written
+    against the old x-major positional signature fails loudly instead of swapping axes.
+    """
+    modelf, tfunc, ffunc = _model_functions(expr, paramf, texpr, fexpr)
+    tval, fval = tfunc(time), ffunc(freq)
+    out = np.zeros((coeffs.shape[0], nyo, nxo), dtype=float)
+    for s in range(coeffs.shape[0]):
+        image_in = np.zeros((nxi, nyi), dtype=float)
+        image_in[x_index, y_index] = modelf(tval, fval, *coeffs[s])
+        # resampling works x-major internally; transpose once on the way out
+        out[s] = _resample_xmajor(image_in, nxi, nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo, cellyo, x0o, y0o).T
+    return out
+
+
+def _resample_xmajor(
+    image_in: np.ndarray,
+    nxi: int,
+    nyi: int,
+    cellxi: float,
+    cellyi: float,
+    x0i: float,
+    y0i: float,
+    nxo: int,
+    nyo: int,
+    cellxo: float,
+    cellyo: float,
+    x0o: float,
+    y0o: float,
+) -> np.ndarray:
+    """Zero-pad and bilinearly resample an x-major ``(nxi, nyi)`` slice onto ``(nxo, nyo)``."""
     pix_area_in = cellxi * cellyi
     pix_area_out = cellxo * cellyo
     area_ratio = pix_area_out / pix_area_in
@@ -338,10 +260,8 @@ def eval_coeffs_to_slice(
 
 
 def model_from_mds(mds_name, freqs=None):
-    """
-    Evaluate component model at the original resolution
-    """
-    mds = xr.open_zarr(mds_name, chunks=None)
+    """Render a `.mds` at any known spec at its own resolution: ``(ntime, nfreq, nstokes, ny, nx)``."""
+    mds = open_mds(mds_name)
     if freqs is None:
         freqs = mds.freqs.values
     else:
@@ -352,8 +272,8 @@ def model_from_mds(mds_name, freqs=None):
         mds.npix_x,
         mds.npix_y,
         mds.coefficients.values,
-        mds.location_x.values,
         mds.location_y.values,
+        mds.location_x.values,
         mds.parametrisation,
         mds.params.values,
         mds.texpr,
