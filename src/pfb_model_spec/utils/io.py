@@ -38,6 +38,11 @@ def build_mds_dataset(
     radec: tuple[float, float],
     stokes: list[str],
     writer_version: str,
+    *,
+    freq_bounds: np.ndarray | None = None,
+    time_bounds: np.ndarray | None = None,
+    weights: np.ndarray | None = None,
+    flux_scale: str | None = None,
 ) -> xr.Dataset:
     """Assemble a `.mds` dataset at the current spec (``SPEC_VERSION``) from fitted coefficients.
 
@@ -66,45 +71,72 @@ def build_mds_dataset(
         radec: `(ra, dec)` in radians.
         stokes: Stokes product per ``coeffs`` plane, e.g. ``["I", "V"]``.
         writer_version: pfb-model-spec (or caller) version recorded as ``writer-version``.
+        freq_bounds: Optional ``(nfreq, 2)`` ``[lo, hi]`` in Hz that each band represents.
+        time_bounds: Optional ``(ntime, 2)`` ``[lo, hi]`` that each time represents.
+        weights: Optional ``(nstokes, ntime, nfreq)`` fit weights; 0 means no data.
+        flux_scale: Optional ``"intrinsic"`` or ``"apparent"``.
 
     Returns:
         The `.mds` ``xarray.Dataset`` (not yet written to disk).
 
     Raises:
-        ValueError: If ``stokes`` does not match ``coeffs``'s leading axis.
+        ValueError: If ``stokes`` does not match ``coeffs``'s leading axis, if
+            ``freq_bounds``, ``time_bounds`` or ``weights`` have the wrong shape, or if
+            ``flux_scale`` is not ``"intrinsic"`` or ``"apparent"``.
     """
     stokes = list(stokes)
     if len(stokes) != coeffs.shape[0]:
         raise ValueError(f"stokes has {len(stokes)} entries but coeffs has {coeffs.shape[0]} planes")
-    return xr.Dataset(
-        data_vars={"coefficients": (("stokes", "par", "comps"), coeffs)},
-        coords={
-            "stokes": (("stokes",), stokes),
-            "location_x": (("comps",), x_index),
-            "location_y": (("comps",), y_index),
-            "params": (("par",), params),
-            "times": (("t",), time),
-            "freqs": (("f",), freq),
-        },
-        attrs={
-            "writer-version": writer_version,
-            "spec": SPEC_VERSION,
-            "cell_rad_x": cell_rad,
-            "cell_rad_y": cell_rad,
-            "npix_x": nx,
-            "npix_y": ny,
-            "texpr": texpr,
-            "fexpr": fexpr,
-            "center_x": x0,
-            "center_y": y0,
-            "flip_u": flip_u,
-            "flip_v": flip_v,
-            "flip_w": flip_w,
-            "ra": radec[0],
-            "dec": radec[1],
-            "parametrisation": expr,
-        },
-    )
+    data_vars = {"coefficients": (("stokes", "par", "comps"), coeffs)}
+    coords = {
+        "stokes": (("stokes",), stokes),
+        "location_x": (("comps",), x_index),
+        "location_y": (("comps",), y_index),
+        "params": (("par",), params),
+        "times": (("t",), time),
+        "freqs": (("f",), freq),
+    }
+    attrs = {
+        "writer-version": writer_version,
+        "spec": SPEC_VERSION,
+        "cell_rad_x": cell_rad,
+        "cell_rad_y": cell_rad,
+        "npix_x": nx,
+        "npix_y": ny,
+        "texpr": texpr,
+        "fexpr": fexpr,
+        "center_x": x0,
+        "center_y": y0,
+        "flip_u": flip_u,
+        "flip_v": flip_v,
+        "flip_w": flip_w,
+        "ra": radec[0],
+        "dec": radec[1],
+        "parametrisation": expr,
+    }
+    nt, nf, ns = len(time), len(freq), len(stokes)
+    if freq_bounds is not None:
+        freq_bounds = np.asarray(freq_bounds, dtype=np.float64)
+        if freq_bounds.shape != (nf, 2):
+            raise ValueError(f"freq_bounds must have shape (nfreq, 2) = ({nf}, 2), got {freq_bounds.shape}")
+        coords["freq_bounds"] = (("f", "bound"), freq_bounds)
+    if time_bounds is not None:
+        time_bounds = np.asarray(time_bounds, dtype=np.float64)
+        if time_bounds.shape != (nt, 2):
+            raise ValueError(f"time_bounds must have shape (ntime, 2) = ({nt}, 2), got {time_bounds.shape}")
+        coords["time_bounds"] = (("t", "bound"), time_bounds)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (ns, nt, nf):
+            raise ValueError(
+                f"weights must have shape (nstokes, ntime, nfreq) = ({ns}, {nt}, {nf}), got {weights.shape}"
+            )
+        data_vars["weights"] = (("stokes", "t", "f"), weights)
+    if flux_scale is not None:
+        if flux_scale not in ("intrinsic", "apparent"):
+            raise ValueError(f"flux_scale must be 'intrinsic' or 'apparent', got {flux_scale!r}")
+        attrs["flux_scale"] = flux_scale
+    return xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
 
 
 def model_to_ds(
@@ -128,6 +160,10 @@ def model_to_ds(
     nbasisf: int | None = None,
     method: str = "Legendre",
     sigmasq: float = 1e-6,
+    *,
+    freq_bounds: np.ndarray | None = None,
+    time_bounds: np.ndarray | None = None,
+    flux_scale: str | None = None,
 ) -> np.ndarray:
     """Fit a model cube to the component model, write it to a `.mds`, and re-render it.
 
@@ -162,6 +198,12 @@ def model_to_ds(
             own default (number of fitted bands) when `None`.
         method: Basis for the frequency fit, forwarded to `fit_image_cube`.
         sigmasq: Regularisation, forwarded to `fit_image_cube`.
+        freq_bounds: Optional ``(nband, 2)`` band edges in Hz, forwarded to `build_mds_dataset`.
+        time_bounds: Optional ``(ntime, 2)`` time edges, forwarded to `build_mds_dataset`.
+        flux_scale: Optional ``"intrinsic"`` or ``"apparent"``, forwarded to `build_mds_dataset`.
+
+    The `.mds` always records ``weights`` from `wgt`, shape ``(nstokes, ntime, nband)``,
+    zero outside `fsel`.
 
     Returns:
         The model cube re-rendered from the fitted coefficients, shape
@@ -186,6 +228,10 @@ def model_to_ds(
         sigmasq=sigmasq,
     )
 
+    nstokes = model.shape[1]
+    # the fit's own weights over every band (zero where not fitted), (stokes, t, f)
+    weights = np.zeros((nstokes, time.size, freq.size))
+    weights[:, :, fsel] = np.asarray(wgt)[fsel].T[:, None, :]
     coeff_dataset = build_mds_dataset(
         coeffs,
         y_index,
@@ -207,6 +253,10 @@ def model_to_ds(
         radec,
         stokes,
         writer_version,
+        freq_bounds=freq_bounds,
+        time_bounds=time_bounds,
+        weights=weights,
+        flux_scale=flux_scale,
     )
     coeff_dataset.to_zarr(mds_name, mode="w")
 
