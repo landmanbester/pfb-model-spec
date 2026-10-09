@@ -198,3 +198,83 @@ def test_model_to_ds_rejects_a_transposed_model(tmp_path):
             ["I"],
             "test",
         )
+
+
+def _tiny_args(nband=3, ny=16, nx=24):
+    freq = np.linspace(1.0e9, 1.4e9, nband)
+    model = np.zeros((nband, 1, ny, nx))
+    model[:, 0, 5, 7] = np.linspace(1.0, 2.0, nband)
+    return freq, model
+
+
+def test_model_to_ds_writes_the_sampling_fields(tmp_path):
+    freq, model = _tiny_args()
+    fsel = np.array([True, False, True])
+    wgt = np.array([[0.5], [0.3], [0.2]])
+    fb = np.stack([freq - 1e8, freq + 1e8], axis=1)
+    tb = np.array([[10.0, 70.0]])
+    name = str(tmp_path / "s.mds")
+    model_to_ds(
+        np.array([40.0]), freq, fsel, model, wgt, name, 1e-5, 24, 16, 0.0, 0.0,
+        False, False, False, (0.1, -0.2), ["I"], "t",
+        freq_bounds=fb, time_bounds=tb, flux_scale="intrinsic",
+    )  # fmt: skip
+    mds = xr.open_zarr(name, chunks=None)
+    assert mds.freq_bounds.dims == ("f", "bound")
+    assert_allclose(mds.freq_bounds.values, fb)
+    assert mds.time_bounds.dims == ("t", "bound")
+    assert_allclose(mds.time_bounds.values, tb)
+    assert mds.weights.dims == ("stokes", "t", "f")
+    # unselected band is explicitly zero
+    assert_allclose(mds.weights.values, [[[0.5, 0.0, 0.2]]])
+    assert mds.attrs["flux_scale"] == "intrinsic"
+
+
+def test_build_mds_dataset_omits_absent_sampling_fields():
+    freq, model = _tiny_args()
+    coeffs = np.ones((1, 1, 2))
+    ds = build_mds_dataset(
+        coeffs, np.array([1, 2]), np.array([3, 4]), "t0", ["t0"], "t", "f",
+        np.array([0.0]), freq, 1e-5, 24, 16, 0.0, 0.0, False, False, False,
+        (0.0, 0.0), ["I"], "t",
+    )  # fmt: skip
+    for name in ("freq_bounds", "time_bounds", "weights"):
+        assert name not in ds.variables
+    assert "flux_scale" not in ds.attrs
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"freq_bounds": np.zeros((2, 2))}, "freq_bounds"),
+        ({"time_bounds": np.zeros((1, 3))}, "time_bounds"),
+        ({"weights": np.zeros((1, 1, 2))}, "weights"),
+        ({"flux_scale": "bogus"}, "flux_scale"),
+    ],
+)
+def test_build_mds_dataset_validates_sampling_fields(kwargs, match):
+    freq, _ = _tiny_args()
+    with pytest.raises(ValueError, match=match):
+        build_mds_dataset(
+            np.ones((1, 1, 2)), np.array([1, 2]), np.array([3, 4]), "t0", ["t0"], "t", "f",
+            np.array([0.0]), freq, 1e-5, 24, 16, 0.0, 0.0, False, False, False,
+            (0.0, 0.0), ["I"], "t", **kwargs,
+        )  # fmt: skip
+
+
+def test_an_empty_model_round_trips(tmp_path):
+    from pfb_model_spec.utils.degrid import render_model_region
+    from pfb_model_spec.utils.spec import open_mds
+
+    freq, model = _tiny_args()
+    model[:] = 0.0
+    name = str(tmp_path / "empty.mds")
+    out = model_to_ds(
+        np.array([0.0]), freq, np.ones(3, bool), model, np.ones((3, 1)), name, 1e-5, 24, 16,
+        0.0, 0.0, False, False, False, (0.0, 0.0), ["I"], "t",
+    )  # fmt: skip
+    assert out.shape == model.shape and not out.any()
+    ds = open_mds(name)
+    assert ds.sizes["comps"] == 0
+    img = render_model_region(ds, time=0.0, freq_out=1.2e9)
+    assert img.shape == (1, 16, 24) and not img.any()
