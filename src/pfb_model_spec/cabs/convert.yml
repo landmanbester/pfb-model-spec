@@ -5,7 +5,7 @@ cabs:
     name: convert
     info:
       Upgrade a component model (.mds) to the current spec.
-    image: ghcr.io/landmanbester/pfb-model-spec:spec-convert
+    image: ghcr.io/landmanbester/pfb-model-spec:latest
     inputs:
       input-mds:
         info:
