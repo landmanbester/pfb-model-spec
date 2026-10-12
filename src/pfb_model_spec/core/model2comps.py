@@ -117,7 +117,8 @@ def model2comps(
         from_fits: WSClean model prefix (see ``read_wsclean_model``).
         overwrite: Overwrite an existing `.mds`.
         nbasisf: Frequency basis order; ``nband - 1`` by default.
-        fit_mode: Basis for the frequency fit (e.g. ``"Legendre"``).
+        fit_mode: Frequency fit method (see ``fit_image_cube``): ``"Legendre"``, ``"poly"``,
+            ``"fakenodes"``, ``"box"`` or ``"tent"``.
         min_val: Zero out model pixels below this flux before fitting.
         suffix: Naming suffix for the derived `.mds`/FITS names.
         model_name: Model label used in the derived names.

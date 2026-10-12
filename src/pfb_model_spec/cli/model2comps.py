@@ -63,7 +63,7 @@ def model2comps(
     fit_mode: Annotated[
         str,
         typer.Option(
-            help="Basis for the frequency fit.",
+            help="Frequency fit method: Legendre, poly, fakenodes, box or tent.",
             rich_help_panel="Fitting",
         ),
     ] = "Legendre",

@@ -6,6 +6,7 @@ import xarray as xr
 from numpy.testing import assert_allclose
 
 from pfb_model_spec.utils.io import build_mds_dataset, model_to_ds
+from pfb_model_spec.utils.modelspec import model_from_mds
 from pfb_model_spec.utils.spec import SPEC_VERSION, upgrade
 from tests._genesis import genesis_dataset
 from tests._synth import gaussian2d, give_edges
@@ -112,7 +113,6 @@ def test_model_to_ds_rerenders_unfitted_bands(tmp_path):
         (0.0, 0.0),
         ["I"],
         "v",
-        nbasisf=2,
         sigmasq=0.0,
     )
     assert_allclose(out[:, 0, 5, 20], 1.0, atol=1e-10)
@@ -228,6 +228,12 @@ def test_model_to_ds_writes_the_sampling_fields(tmp_path):
     # unselected band is explicitly zero
     assert_allclose(mds.weights.values, [[[0.5, 0.0, 0.2]]])
     assert mds.attrs["flux_scale"] == "intrinsic"
+    # the default tent fit takes the fitted bands' edges from freq_bounds[fsel]: band 0
+    # [0.9, 1.1] GHz has mean 1 and band 2 [1.3, 1.5] GHz mean 2, the unfitted gap splits at
+    # 1.2 GHz, and the end values are held beyond the outer edges
+    freqs = np.array([0.8, 0.9, 1.0, 1.15, 1.25, 1.4, 1.5, 1.6]) * 1e9
+    rendered = model_from_mds(name, freqs)[0, :, 0, 5, 7]
+    assert_allclose(rendered, [0.75, 0.75, 1.0, 1.25, 1.75, 2.0, 2.25, 2.25], atol=1e-12)
 
 
 def test_build_mds_dataset_omits_absent_sampling_fields():
