@@ -25,7 +25,51 @@ def _scale(x: np.ndarray, sym: sm.Symbol, method: str) -> tuple[np.ndarray, sm.E
     return (x - centre) / half, (sym - centre) / half
 
 
-def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, method="poly", sigmasq=0):
+def _fake_nodes(x: np.ndarray, sym: sm.Symbol, bounds: np.ndarray | None) -> tuple[np.ndarray, sm.Expr]:
+    """Map an axis through the "fake nodes" cosine map, returning ``(mapped values, sympy map)``.
+
+    ``S(x) = -cos(pi (x - lo) / (hi - lo))`` maps ``[lo, hi]`` onto ``[-1, 1]``. The domain is
+    the outer edge of the samples' bins: ``bounds`` (``(n, 2)`` ``[lo, hi]`` per sample) when
+    given, else half a sample spacing beyond the first and last samples. Equispaced bin
+    centres then land exactly on the Chebyshev (first kind) nodes, so interpolating in ``S``
+    neither shows Runge's phenomenon nor extrapolates anywhere inside the outer bins. Outside
+    ``[lo, hi]`` the map folds back, mirroring the interpolant rather than diverging.
+
+    A length-1 axis is left unscaled, as in :func:`_scale`.
+
+    Raises:
+        ValueError: If ``bounds`` has the wrong shape or an empty domain.
+    """
+    if x.size == 1:
+        return x.astype(float), sym
+    if bounds is None:
+        xs = np.sort(x)
+        lo = xs[0] - (xs[1] - xs[0]) / 2
+        hi = xs[-1] + (xs[-1] - xs[-2]) / 2
+    else:
+        bounds = np.asarray(bounds, dtype=float)
+        if bounds.shape != (x.size, 2):
+            raise ValueError(f"bounds must have shape ({x.size}, 2), got {bounds.shape}")
+        lo, hi = bounds.min(), bounds.max()
+    if not hi > lo:
+        raise ValueError(f"empty fake-nodes domain [{lo}, {hi}]")
+    lo, hi = float(lo), float(hi)
+    return -np.cos(np.pi * (x - lo) / (hi - lo)), -sm.cos(sm.pi * (sym - lo) / (hi - lo))
+
+
+def fit_image_cube(
+    time,
+    freq,
+    image,
+    wgt=None,
+    nbasist=None,
+    nbasisf=None,
+    method="poly",
+    sigmasq=0,
+    *,
+    time_bounds=None,
+    freq_bounds=None,
+):
     """Fit the time and frequency axes of a multi-Stokes image cube.
 
     The basis is additive: functions of time (including the constant) plus functions of
@@ -41,9 +85,15 @@ def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, meth
         nbasist: Number of time basis functions (default ``ntime``).
         nbasisf: Number of frequency basis functions, counting the shared constant
             (default ``nband``).
-        method: ``"poly"`` (monomials) or ``"Legendre"``.
+        method: ``"poly"`` (monomials), ``"Legendre"``, or ``"fakenodes"`` (Chebyshev
+            polynomials of the cosine-mapped axis, see :func:`_fake_nodes`). Use
+            ``"fakenodes"`` to evaluate between or beyond the band centres: the polynomial
+            methods ring there (Runge's phenomenon) when ``nbasisf`` is close to ``nband``.
         sigmasq: Ridge term added to the Hessian; ignored when ``ntime == nband == 1``
             (nothing to fit: the data are the coefficients, whatever the weights).
+        time_bounds: Optional ``(ntime, 2)`` ``[lo, hi]`` per time bin; ``"fakenodes"`` only.
+        freq_bounds: Optional ``(nband, 2)`` ``[lo, hi]`` in Hz per band; ``"fakenodes"``
+            only. Without bounds the domain extends half a sample spacing past the ends.
 
     Returns:
         ``(coeffs, y_index, x_index, expr, params, texpr, fexpr)``:
@@ -82,11 +132,20 @@ def fit_image_cube(time, freq, image, wgt=None, nbasist=None, nbasisf=None, meth
         def basis(i, w, sym):
             return np.polynomial.Legendre.basis(i)(w), sm.polys.orthopolys.legendre_poly(i, sym)
 
+    elif method == "fakenodes":
+
+        def basis(i, w, sym):
+            return np.polynomial.Chebyshev.basis(i)(w), sm.chebyshevt_poly(i, sym)
+
     else:
         raise NotImplementedError(f"Method {method} not implemented")
 
-    wt, tfunc = _scale(time, t, method)
-    wf, ffunc = _scale(freq, f, method)
+    if method == "fakenodes":
+        wt, tfunc = _fake_nodes(time, t, time_bounds)
+        wf, ffunc = _fake_nodes(freq, f, freq_bounds)
+    else:
+        wt, tfunc = _scale(time, t, method)
+        wf, ffunc = _scale(freq, f, method)
     tparams = sm.symbols(f"t(0:{nbasist})")
     fparams = sm.symbols(f"f(1:{nbasisf})") if nbasisf > 1 else ()
 

@@ -2,8 +2,11 @@
 
 import numpy as np
 import pytest
+import sympy as sm
 import xarray as xr
 from numpy.testing import assert_allclose
+from sympy.parsing.sympy_parser import parse_expr
+from sympy.utilities.lambdify import lambdify
 
 from pfb_model_spec.utils.io import build_mds_dataset, model_to_ds
 from pfb_model_spec.utils.spec import SPEC_VERSION, upgrade
@@ -228,6 +231,9 @@ def test_model_to_ds_writes_the_sampling_fields(tmp_path):
     # unselected band is explicitly zero
     assert_allclose(mds.weights.values, [[[0.5, 0.0, 0.2]]])
     assert mds.attrs["flux_scale"] == "intrinsic"
+    # the default fakenodes fit spans the outer edges of the fitted bands only
+    ffunc = lambdify(sm.Symbol("f"), parse_expr(mds.fexpr))
+    assert_allclose(ffunc(fb[fsel][[0, -1], [0, 1]]), [-1.0, 1.0], atol=1e-12)
 
 
 def test_build_mds_dataset_omits_absent_sampling_fields():

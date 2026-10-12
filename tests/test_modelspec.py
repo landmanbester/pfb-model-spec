@@ -6,7 +6,10 @@ axis cannot pass silently.
 
 import numpy as np
 import pytest
+import sympy as sm
 from numpy.testing import assert_allclose
+from sympy.parsing.sympy_parser import parse_expr
+from sympy.utilities.lambdify import lambdify
 
 from pfb_model_spec.utils.modelspec import (
     eval_coeffs_to_cube,
@@ -100,7 +103,7 @@ def test_time_and_frequency_fit_is_exact(method):
     assert_allclose(image, cube, atol=1e-8)
 
 
-@pytest.mark.parametrize("method", ["Legendre", "poly"])
+@pytest.mark.parametrize("method", ["Legendre", "poly", "fakenodes"])
 def test_single_time_single_band_returns_the_data(method):
     """Nothing to fit: the pixel values are the coefficients, even with sigmasq set."""
     cube = np.zeros((1, 1, 2, 4, 6))
@@ -123,6 +126,73 @@ def test_single_sample_fit_ignores_a_zero_weight_plane():
     coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(time, freq, cube, wgt=wgt)
     image = eval_coeffs_to_cube(time, freq, 6, 4, coeffs, yi, xi, expr, params, texpr, fexpr)
     assert_allclose(image, cube, rtol=1e-12)
+
+
+def _channel_render(freq, cube, chan, **fit_kwargs):
+    """Fit ``(nband, ny, nx)`` and render the fit at the channel frequencies ``chan``."""
+    time = np.array([0.0])
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(
+        time, freq, cube[None, :, None], sigmasq=0.0, **fit_kwargs
+    )
+    ny, nx = cube.shape[-2:]
+    return eval_coeffs_to_cube(time, chan, nx, ny, coeffs, yi, xi, expr, params, texpr, fexpr)[0, :, 0]
+
+
+def test_fakenodes_does_not_ring_between_band_centres():
+    """#29: a 0.1% perturbation of the band values stays small everywhere in the outer band edges.
+
+    An interpolating polynomial amplifies it exponentially in nband (Runge); fake nodes keeps
+    the gain at the Chebyshev nodes' ~log(nband). The price is an O(1/nband) bias near the
+    outer edges, where the cosine map has zero slope -- hence the 1% tolerance.
+    """
+    nband, nsub = 32, 16
+    edges = np.linspace(0.856e9, 1.712e9, nband + 1)
+    freq = (edges[:-1] + edges[1:]) / 2
+    chan = np.linspace(edges[0], edges[-1], nband * nsub)
+    perturbation = 1 + 1e-3 * np.random.default_rng(29).standard_normal(nband)
+    cube = np.zeros((nband, 3, 4))
+    cube[:, 1, 2] = (freq / 1.284e9) ** -0.7 * perturbation
+    truth = (chan / 1.284e9) ** -0.7
+
+    fake = _channel_render(freq, cube, chan, method="fakenodes")[:, 1, 2]
+    assert_allclose(fake, truth, rtol=1e-2)
+    legendre = _channel_render(freq, cube, chan, method="Legendre")[:, 1, 2]
+    assert np.abs(legendre - truth).max() > 1.0
+
+
+def test_fakenodes_interpolates_without_ringing():
+    """nbasisf == nband reproduces every band; a peaked spectrum barely undershoots between them."""
+    nband = 12
+    edges = np.linspace(0.856e9, 1.712e9, nband + 1)
+    freq = (edges[:-1] + edges[1:]) / 2
+    chan = np.linspace(edges[0], edges[-1], 50 * nband)
+    cube = np.zeros((nband, 3, 4))
+    cube[:, 2, 1] = np.exp(-(((freq - 1.1e9) / 1.5e8) ** 2))
+    assert_allclose(_channel_render(freq, cube, freq, method="fakenodes"), cube, atol=1e-12)
+    assert _channel_render(freq, cube, chan, method="fakenodes")[:, 2, 1].min() > -1e-3
+    assert _channel_render(freq, cube, chan, method="Legendre")[:, 2, 1].min() < -0.1
+
+
+def test_fakenodes_maps_band_centres_onto_chebyshev_nodes():
+    """The domain is the outer band edges, from freq_bounds or half a spacing past the ends."""
+    nband = 7
+    edges = np.linspace(1.0e9, 1.7e9, nband + 1)
+    freq = (edges[:-1] + edges[1:]) / 2
+    cube = np.ones((1, nband, 1, 2, 2))
+    chebyshev = -np.cos(np.pi * (2 * np.arange(nband) + 1) / (2 * nband))
+    bounds = np.stack([edges[:-1], edges[1:]], axis=1)
+    for freq_bounds in (None, bounds):
+        *_, fexpr = fit_image_cube(np.array([0.0]), freq, cube, method="fakenodes", freq_bounds=freq_bounds)
+        ffunc = lambdify(sm.Symbol("f"), parse_expr(fexpr))
+        assert_allclose(ffunc(freq), chebyshev, atol=1e-12)
+        assert_allclose(ffunc(edges[[0, -1]]), [-1.0, 1.0], atol=1e-12)
+
+
+def test_fakenodes_rejects_misshapen_bounds():
+    cube = np.ones((1, 3, 1, 2, 2))
+    freq = np.array([1.0e9, 1.1e9, 1.2e9])
+    with pytest.raises(ValueError, match="bounds"):
+        fit_image_cube(np.array([0.0]), freq, cube, method="fakenodes", freq_bounds=np.ones((2, 2)))
 
 
 def test_poly_fit_with_a_single_band():

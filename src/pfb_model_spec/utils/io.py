@@ -158,7 +158,7 @@ def model_to_ds(
     stokes: list[str],
     writer_version: str,
     nbasisf: int | None = None,
-    method: str = "Legendre",
+    method: str = "fakenodes",
     sigmasq: float = 1e-6,
     *,
     freq_bounds: np.ndarray | None = None,
@@ -196,10 +196,14 @@ def model_to_ds(
         writer_version: pfb-model-spec (or caller) version to record in the `.mds` attrs.
         nbasisf: Number of frequency basis functions; defaults to `fit_image_cube`'s
             own default (number of fitted bands) when `None`.
-        method: Basis for the frequency fit, forwarded to `fit_image_cube`.
+        method: Basis for the fit, forwarded to `fit_image_cube`. The default,
+            ``"fakenodes"``, does not ring between band centres, so the model can be
+            rendered at any frequency inside the fitted bands.
         sigmasq: Regularisation, forwarded to `fit_image_cube`.
-        freq_bounds: Optional ``(nband, 2)`` band edges in Hz, forwarded to `build_mds_dataset`.
-        time_bounds: Optional ``(ntime, 2)`` time edges, forwarded to `build_mds_dataset`.
+        freq_bounds: Optional ``(nband, 2)`` band edges in Hz, forwarded to `build_mds_dataset`;
+            ``freq_bounds[fsel]`` also sets the ``"fakenodes"`` fit domain.
+        time_bounds: Optional ``(ntime, 2)`` time edges, forwarded to `build_mds_dataset` and,
+            for ``"fakenodes"``, used as the time fit domain.
         flux_scale: Optional ``"intrinsic"`` or ``"apparent"``, forwarded to `build_mds_dataset`.
 
     The `.mds` always records ``weights`` from `wgt`, shape ``(nstokes, ntime, nband)``,
@@ -226,6 +230,8 @@ def model_to_ds(
         nbasisf=nbasisf,
         method=method,
         sigmasq=sigmasq,
+        time_bounds=time_bounds,
+        freq_bounds=None if freq_bounds is None else np.asarray(freq_bounds)[fsel],
     )
 
     nstokes = model.shape[1]
