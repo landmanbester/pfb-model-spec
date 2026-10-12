@@ -253,9 +253,7 @@ def test_render_model_region_rejects_unknown_spec():
 
 
 def test_render_model_region_refine_conserves_flux():
-    """Refining the grid (finer cell, more pixels) is exact -- see the module
-    docstring's Note. This exercises the non-default-grid path, previously
-    untested."""
+    """Refining the grid (finer cell, more pixels) conserves flux."""
     ds, time, freq, cell = _single_component_mds()
     nxi, nyi = ds.attrs["npix_x"], ds.attrs["npix_y"]
     got = render_model_region(
@@ -269,12 +267,9 @@ def test_render_model_region_refine_conserves_flux():
     assert got.sum() == pytest.approx(1.0, abs=1e-8)
 
 
-def test_render_model_region_coarsen_inflates_flux_by_area_ratio():
-    """Pins the documented `eval_coeffs_to_slice` limitation (module
-    docstring's Note): coarsening is NOT flux-conserving, it inflates by
-    `area_ratio` (here x4 for a x2 coarsening). This is a known limitation
-    being pinned, not desired behaviour -- do not read this as an assertion
-    that the inflation is correct."""
+@pytest.mark.parametrize("kernel", ["box", "tent"])
+def test_render_model_region_coarsen_conserves_flux(kernel):
+    """#23: coarsening used to inflate flux by `area_ratio` (x4 for this x2 coarsening)."""
     ds, time, freq, cell = _single_component_mds()
     nxi, nyi = ds.attrs["npix_x"], ds.attrs["npix_y"]
     got = render_model_region(
@@ -284,8 +279,9 @@ def test_render_model_region_coarsen_inflates_flux_by_area_ratio():
         nx=nxi // 2,
         ny=nyi // 2,
         cell_rad=cell * 2,
+        kernel=kernel,
     )
-    assert got.sum() == pytest.approx(4.0, rel=1e-6)
+    assert got.sum() == pytest.approx(1.0, abs=1e-8)
 
 
 def _single_component_mds(nx=64, ny=48):

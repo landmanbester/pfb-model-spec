@@ -197,3 +197,40 @@ def test_model_from_mds_renders_an_upgraded_genesis_losslessly(tmp_path):
 
     one = model_from_mds(str(path), freqs=FREQS[2])
     assert_allclose(one[0, 0, 0], genesis_cube(FREQS[2:])[0].T, atol=1e-12)
+
+
+@pytest.mark.parametrize("kernel", ["box", "tent"])
+@pytest.mark.parametrize(("factor", "npix"), [(1.0, 64), (0.5, 128), (2.0, 32), (4.0, 16)])
+def test_slice_conserves_single_component_flux(kernel, factor, npix):
+    """#23: a unit component keeps unit flux whether the output grid is refined or coarsened
+    (the old resampler gave 4.0 for x2 coarsening and 16.0 for x4)."""
+    cube = np.zeros((1, 1, 1, 64, 64))
+    cube[0, 0, 0, 32, 32] = 1.0
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(np.array([0.0]), np.array([1.0e9]), cube)
+    cell = np.deg2rad(2.0 / 3600.0)
+    out = eval_coeffs_to_slice(
+        0.0,
+        1.0e9,
+        coeffs,
+        yi,
+        xi,
+        expr,
+        params,
+        texpr,
+        fexpr,
+        nxi=64,
+        nyi=64,
+        cellxi=cell,
+        cellyi=cell,
+        x0i=0.0,
+        y0i=0.0,
+        nxo=npix,
+        nyo=npix,
+        cellxo=cell * factor,
+        cellyo=cell * factor,
+        x0o=0.0,
+        y0o=0.0,
+        kernel=kernel,
+    )
+    assert out.shape == (1, npix, npix)
+    assert out.sum() == pytest.approx(1.0, abs=1e-12)

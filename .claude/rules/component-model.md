@@ -1,6 +1,6 @@
 # The Component Model (`.mds` spec)
 
-Read this when working on `src/pfb_model_spec/utils/{modelspec,io,spec}.py`,
+Read this when working on `src/pfb_model_spec/utils/{modelspec,io,spec,remap}.py`,
 the `.mds` format, or the fit/render routines.
 
 ## What it is
@@ -46,9 +46,10 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
 - `eval_coeffs_to_cube(time, freq, nx, ny, coeffs, y_index, x_index, expr, paramf, texpr, fexpr)`
   → render coefficients to a `(ntime, nfreq, nstokes, ny, nx)` cube.
 - `eval_coeffs_to_slice(time, freq, coeffs, y_index, x_index, expr, paramf, texpr, fexpr, *, nxi,
-  nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo, cellyo, x0o, y0o)` → render to a
-  `(nstokes, nyo, nxo)` slice, with zero-padding + bilinear resampling onto an arbitrary output
-  grid. The geometry arguments are keyword-only.
+  nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo, cellyo, x0o, y0o, kernel="box")` → render to a
+  `(nstokes, nyo, nxo)` slice on the model's grid, then remap it flux-conservingly onto an
+  arbitrary output grid via `remap_image` (see "The remap API"). The geometry arguments are
+  keyword-only.
 - `model_from_mds(mds_name, freqs=None)` → open an `.mds` zarr (any known spec, upgraded on read) and render at original resolution.
 
 ## The I/O API (`utils/io.py`)
@@ -86,7 +87,7 @@ distribution and the MS write belong to the calling application (pfb-imaging's
 - `model_sampling(model_ds)` → the optional sampling fields as a dict (`freq_bounds`, `time_bounds`,
   `weights`, `flux_scale`), each `None` when absent (always the case for an upgraded genesis `.mds`).
   Consumers derive defaults from these, e.g. a degrid chunk spanning one imaging band.
-- `render_model_region(model_ds, *, time, freq_out, nx=…, ny=…, cell_rad=…, x0=…, y0=…)` →
+- `render_model_region(model_ds, *, time, freq_out, nx=…, ny=…, cell_rad=…, x0=…, y0=…, kernel="box")` →
   `(nstokes, ny, nx)`. Wraps `eval_coeffs_to_slice`; the output grid defaults to the model's
   own. `freq_out` may lie between fitted bands — that continuity is what lets a consumer predict
   at finer spectral resolution than the imaging run used.
@@ -122,13 +123,28 @@ disagree about where the model was evaluated. (This differs from pfb-imaging's D
 weight-weighted effective frequency, which is an *imager* rule that applies where weights
 are in hand.)
 
-**Known limitation — resampling is not flux-conserving when coarsening.**
-`eval_coeffs_to_slice` scales by `area_ratio = pix_area_out / pix_area_in`, correct for a
-surface-brightness field but not for the point components a `.mds` stores. Measured with a
-single unit component: same grid → 1.0 (exact); refine ×2 → 1.0 (conserved); coarsen ×2 →
-4.0; coarsen ×4 → 16.0, i.e. inflated by exactly `area_ratio`. Degridding always renders on
-the model's own grid and is unaffected, but `--transfer-model-from`
-(ratt-ru/pfb-imaging#309) will hit it.
+## The remap API (`utils/remap.py`)
+
+Flux-conserving remapping between axis-aligned rectilinear grids (#23). Pixel values are flux
+per pixel, so remapping redistributes flux; it does not sample a field. Separable sparse 1-D
+overlap weights are applied along x, then y. Flux outside the output footprint is dropped,
+never wrapped. NUFFT/sinc resampling was rejected because it rings (negative sidelobes) and is
+periodic.
+
+- `remap_image(image, *, kernel="box", nxi, nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo,
+  cellyo, x0o, y0o)` → `(..., nyo, nxo)`. `kernel` is one of `KERNELS`:
+  - `"box"`: uniform brightness per input pixel; integer coarsening equals block sums.
+  - `"tent"`: piecewise-linear brightness with a minmod-limited slope. It is the identity on the
+    same grid. An isolated component is never smeared, and smooth emission
+    refines smoothly. The limiter makes it nonlinear, hence the name "tent" and not "linear".
+  - Both kernels conserve flux, and map non-negative input to non-negative output (Stokes
+    Q/U/V may be negative; that is fine); identical geometry returns a copy.
+- `remap_coefficients(coeffs, y_index, x_index, expr, params, *, <geometry>)` →
+  `(coeffs_out, y_index_out, x_index_out)`. It remaps `.mds` coefficients directly (box only),
+  equivalent to box-remapping every rendering. It applies only to parametrisations that are
+  linear and homogeneous in their coefficients, and raises `ValueError` otherwise (e.g. power-law
+  models, possibly #29). **The image-space path must always remain available**: nothing may
+  depend on the coefficient shortcut.
 
 ## The converter (`core/model2comps.py`, `utils/fits.py`)
 
@@ -200,5 +216,9 @@ round-trip and integer-pixel-shift interpolation invariance. `tests/_genesis.py`
 the same way, additionally asserting the written `.mds` zarr's attrs/coords. `tests/test_model2comps.py`
 writes a synthetic cube out as WSClean `-####-model.fits` planes, runs the converter, and asserts the
 `.mds` round-trips (exact for an `nbasisf == nband`, `sigmasq == 0` fit) plus the overwrite/no-image
-guards. No MS / `daskms` / `africanus` needed. Tests require the `full` extra
+guards. `tests/test_remap.py` covers the remap: flux conservation (refine/coarsen/non-integer ratios,
+offsets, non-square cells), same-grid identity, exact block sums and integer shifts, footprint
+drop/straddle, sparsity, the tent kernel's ramp exactness and positivity, and
+`remap_coefficients` ≡ box-remapping the rendering; `test_modelspec.py`/`test_degrid.py` assert a unit
+component keeps unit flux through `eval_coeffs_to_slice`/`render_model_region`. No MS / `daskms` / `africanus` needed. Tests require the `full` extra
 (`uv run --extra full pytest`).

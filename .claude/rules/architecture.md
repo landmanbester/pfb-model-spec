@@ -12,7 +12,7 @@ deviate, check [hip-cargo's docs](https://github.com/landmanbester/hip-cargo) fi
 |---|---|---|
 | `cli/` | Thin Typer wrappers with `@stimela_cab` (+ optional `@stimela_output`). One file per command. Imports from `core/` are **lazy** (inside the function body). | Heavy imports at module top. Business logic. NumPy/domain libs. |
 | `core/` | The real implementation — same function name as the CLI wrapper, **no** Typer/hip-cargo decorators. Free to import anything. | Typer. `@stimela_cab`. `typer.Exit(...)`. UI concerns. |
-| `utils/` | The component-model spec library, outside the command-oriented layout: `modelspec.py` (fit + render, numpy/sympy/scipy/xarray) and `io.py` (`model_to_ds` — fit, write `.mds`, re-render; numpy/xarray/zarr). Self-contained library code, **not** CLI commands. See `component-model.md`. | Typer. `@stimela_cab`. Any dependency on `pfb_imaging`. |
+| `utils/` | The component-model spec library, outside the command-oriented layout: `modelspec.py` (fit + render, numpy/sympy/scipy/xarray), `remap.py` (flux-conserving regrid, numpy/scipy.sparse) and `io.py` (`model_to_ds` — fit, write `.mds`, re-render; numpy/xarray/zarr). Self-contained library code, **not** CLI commands. See `component-model.md`. | Typer. `@stimela_cab`. Any dependency on `pfb_imaging`. |
 | `cabs/` | Generated `<command>.yml` files, committed to source control, loaded by Stimela. | Anything hand-written. Drift from `cli/*.py`. |
 
 **`__init__.py`** — must stay light (only `__version__`). It must **not** import `utils.modelspec`
