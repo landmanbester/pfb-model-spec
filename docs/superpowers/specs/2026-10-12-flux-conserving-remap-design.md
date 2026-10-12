@@ -14,10 +14,10 @@ multiplication by `area_ratio = pix_area_out / pix_area_in`. That is correct for
 surface-brightness field but not for what a `.mds` stores, **flux per pixel (Jy/pixel)**.
 Refining conserves flux by coincidence; coarsening ×2 inflates it ×4, ×4 inflates it ×16 (#23).
 
-This is no longer just a hypothetical problem. pfb-imaging's `--transfer-model-from` (#309) already calls
-`render_model_region(..., nx=, ny=, cell_rad=, x0=, y0=)` with the *target* imaging grid
-(`pfb_imaging/core/imager.py`), so a transfer to a coarser cell currently seeds an inflated
-model.
+Nothing reaches the bug today: pfb-imaging's `--transfer-model-from` (#309) renders off-grid
+through `render_model_region`, but `check_transfer_geometry` (`pfb_imaging/core/imager.py`)
+refuses a coarser target cell for exactly this reason. That guard can be lifted once this
+lands (follow-up in pfb-imaging).
 
 ## Decisions taken in discussion
 
@@ -29,8 +29,8 @@ model.
   It is also periodic, so emission outside the output footprint wraps in. Both are bad for
   seeding a positivity-constrained deconvolver. It may come back later as an optional mode; it
   is not part of this design.
-- **The kernel is a user choice:** `"box"` (piecewise-constant) or `"linear"` (piecewise-linear
-  with a minmod slope limiter).
+- **The kernel is a user choice:** `"box"` (piecewise-constant) or `"tent"` (piecewise-linear
+  with a minmod slope limiter; named for its shape, since the limiter makes it nonlinear).
 - **The image-space path is always available.** A coefficient-space shortcut is offered only
   for parametrisations that are linear in their coefficients. Planned power-law models and the
   #29 parametrisation work may not be, so nothing may depend on the shortcut.
@@ -40,7 +40,7 @@ model.
 1. Flux-conserving, positivity-preserving remapping of `(…, ny, nx)` images between any two
    axis-aligned rectilinear grids (any cell sizes, sizes and centre offsets, non-square allowed),
    in both directions.
-2. A selectable kernel, `"box"` or `"linear"`, defaulting to `"box"`.
+2. A selectable kernel, `"box"` or `"tent"`, defaulting to `"box"`.
 3. `eval_coeffs_to_slice` and `render_model_region` use it, and the `area_ratio` scaling goes away.
 4. A helper that remaps the **coefficients** of a linear parametrisation directly (box only),
    for writing a `.mds` on a new grid without rendering every (time, freq).
@@ -62,7 +62,7 @@ Along each axis, pixel `k` of an `n`-pixel grid with cell `c` and centre offset 
 flux; it does not sample a field.
 
 All weights are separable: a 2-D remap is a 1-D remap along x (`NAXIS1`, last axis) followed by a
-1-D remap along y. For `"box"` the order is irrelevant. For `"linear"` the limiter makes the
+1-D remap along y. For `"box"` the order is irrelevant. For `"tent"` the limiter makes the
 result depend slightly on the order, so the order is fixed (x then y) and documented.
 
 ## Kernels (1-D)
@@ -76,7 +76,7 @@ Let `u_i` be input fluxes. Then `b_i = u_i / c_in` is the mean brightness in inp
 W[o, i] = |O(o, i)| / c_in            out = W @ u
 ```
 
-**`"linear"`**: brightness is linear within each input pixel, with a limited slope:
+**`"tent"`**: brightness is linear within each input pixel, with a limited slope:
 
 ```
 b(x) = b_i + s_i (x - x_i)       for x in pixel i
@@ -96,7 +96,7 @@ smaller in magnitude. Consequences, each of which is tested:
 - **An isolated component behaves exactly like box.** Its neighbour differences have opposite
   signs, so `s = 0` and point sources are never smeared. Smooth extended emission refines smoothly.
 - **Exactness.** It is exact for brightness that varies linearly in the interior.
-- **Nonlinearity.** The limiter makes `"linear"` nonlinear in `u`, so `"linear"` is image-space only.
+- **Nonlinearity.** The limiter makes `"tent"` nonlinear in `u`, so `"tent"` is image-space only.
 
 `W` and `M` are `scipy.sparse` matrices of shape `(n_out, n_in)`, each with
 `O(n_in + n_out)` non-zeros. Dense matrices would be prohibitive at 10k-pixel grids.
@@ -124,7 +124,7 @@ otherwise equals the flux inside the output footprint.
     w.r.t. params vanish, and `expr` is `0` when every param is `0`; checked with sympy). Otherwise
     it raises `ValueError`, naming `remap_image` as the alternative. This is what keeps power-law
     or other nonlinear parametrisations correct: they fail loudly instead of being remapped wrongly.
-  - Box only, because the linear kernel is not linear in the data. The signature has no
+  - Box only, because the tent kernel is not linear in the data. The signature has no
     `kernel` argument.
   - It returns only coefficients and locations; the caller writes the new `.mds` via
     `build_mds_dataset` with the target geometry.
@@ -149,8 +149,9 @@ otherwise equals the flux inside the output footprint.
 - Every existing call keeps working: the new arguments are additive, keyword-only and defaulted.
 - **Numerics change for every off-grid call.** That is the fix, and it is a behavioural contract
   change (`component-model.md` → "Ownership"). The only off-grid consumer is pfb-imaging's
-  `--transfer-model-from`, which gets correct flux without any code change. Its tests should be
-  re-run against this branch before release.
+  `--transfer-model-from`, which only refines or shifts today (where the old resampler was
+  already flux-conserving), so its numbers shift slightly but stay conserving; its tests should
+  be re-run against this branch before release.
 - There is no `.mds` change, so no `SPEC_VERSION` step is needed. It ships in the unreleased 0.1.0.
 
 ## Testing (`tests/test_remap.py`, plus edits)
@@ -164,7 +165,7 @@ Synthetic only, following the existing style:
 - **Box exactness:** coarsening by an integer factor equals block sums; an integer-pixel shift
   moves values exactly. This keeps `test_slice_matches_cube_and_is_shift_invariant` passing.
 - **Positivity:** `out ≥ 0` for random non-negative input with both kernels.
-- **Linear kernel:**
+- **Tent kernel:**
   - an isolated component gives the same result as box;
   - a linear ramp, refined ×2, is reproduced exactly in the interior;
   - for a smooth Gaussian refined ×4, the error is smaller than box's.
