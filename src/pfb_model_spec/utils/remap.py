@@ -8,9 +8,10 @@ a 1-D remap along x (the last axis) followed by one along y.
 Kernels:
     ``"box"``: brightness is uniform within each input pixel (first-order conservative).
     ``"tent"``: brightness is linear within each input pixel, with a minmod-limited slope
-        (second-order conservative). It is positive and the identity on the same grid; an
-        isolated component gets zero slope, so it is never smeared. The limiter makes it
-        nonlinear in the image, and the x-then-y order makes it very slightly anisotropic.
+        (second-order conservative). It keeps non-negative input non-negative and is the
+        identity on the same grid; an isolated component gets zero slope, so it is never
+        smeared. The limiter makes it nonlinear in the image, and the x-then-y order makes it
+        very slightly anisotropic.
 
 Flux from input pixels outside the output footprint is dropped, never wrapped.
 """

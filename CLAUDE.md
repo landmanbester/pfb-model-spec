@@ -31,6 +31,11 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
   correlations. Pure numpy — the calling application owns chunking, distribution and I/O.
   Consumed by pfb-imaging's `degrid-msv4` (ratt-ru/pfb-imaging#278). See
   `.claude/rules/component-model.md` → "The degrid API".
+- **Flux-conserving remap** (`utils/remap.py`, #23): `eval_coeffs_to_slice` / `render_model_region`
+  render on the model's grid and remap onto any rectilinear output grid with a `"box"` or `"tent"`
+  kernel (conserves flux when refining, coarsening or shifting; no wrap-around). `remap_coefficients`
+  is a box-only shortcut for parametrisations linear in their coefficients; the image-space path must
+  always remain available. See `.claude/rules/component-model.md` → "The remap API".
 - **Spec versioning + `pfbspec convert`** (`utils/spec.py`, `core/convert.py`) — the current spec is
   `"0.1"` (Stokes axis, `(Y, X)` cubes); older `.mds` stores upgrade on read; a schema change needs a
   breaking version bump plus a registry step. See `.claude/rules/component-model.md` → "Spec versions".

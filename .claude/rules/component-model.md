@@ -134,10 +134,11 @@ periodic.
 - `remap_image(image, *, kernel="box", nxi, nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo,
   cellyo, x0o, y0o)` → `(..., nyo, nxo)`. `kernel` is one of `KERNELS`:
   - `"box"`: uniform brightness per input pixel; integer coarsening equals block sums.
-  - `"tent"`: piecewise-linear brightness with a minmod-limited slope. It is positive and the
-    identity on the same grid. An isolated component is never smeared, and smooth emission
+  - `"tent"`: piecewise-linear brightness with a minmod-limited slope. It is the identity on the
+    same grid. An isolated component is never smeared, and smooth emission
     refines smoothly. The limiter makes it nonlinear, hence the name "tent" and not "linear".
-  - Both kernels conserve flux and preserve positivity; identical geometry returns a copy.
+  - Both kernels conserve flux, and map non-negative input to non-negative output (Stokes
+    Q/U/V may be negative; that is fine); identical geometry returns a copy.
 - `remap_coefficients(coeffs, y_index, x_index, expr, params, *, <geometry>)` →
   `(coeffs_out, y_index_out, x_index_out)`. It remaps `.mds` coefficients directly (box only),
   equivalent to box-remapping every rendering. It applies only to parametrisations that are
@@ -215,5 +216,9 @@ round-trip and integer-pixel-shift interpolation invariance. `tests/_genesis.py`
 the same way, additionally asserting the written `.mds` zarr's attrs/coords. `tests/test_model2comps.py`
 writes a synthetic cube out as WSClean `-####-model.fits` planes, runs the converter, and asserts the
 `.mds` round-trips (exact for an `nbasisf == nband`, `sigmasq == 0` fit) plus the overwrite/no-image
-guards. No MS / `daskms` / `africanus` needed. Tests require the `full` extra
+guards. `tests/test_remap.py` covers the remap: flux conservation (refine/coarsen/non-integer ratios,
+offsets, non-square cells), same-grid identity, exact block sums and integer shifts, footprint
+drop/straddle, sparsity, the tent kernel's ramp exactness and positivity, and
+`remap_coefficients` ≡ box-remapping the rendering; `test_modelspec.py`/`test_degrid.py` assert a unit
+component keeps unit flux through `eval_coeffs_to_slice`/`render_model_region`. No MS / `daskms` / `africanus` needed. Tests require the `full` extra
 (`uv run --extra full pytest`).
