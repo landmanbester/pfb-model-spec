@@ -140,3 +140,84 @@ def remap_image(
     wy, my = _axis_weights(nyi, cellyi, y0i, nyo, cellyo, y0o)
     out = _remap_axis(image, -1, wx, mx, kernel)
     return _remap_axis(out, -2, wy, my, kernel)
+
+
+def _check_linear(expr: str, params: list[str]) -> None:
+    """Raise unless ``expr`` is linear and homogeneous in ``params``."""
+    import sympy as sm
+    from sympy.parsing.sympy_parser import parse_expr
+
+    parsed = parse_expr(expr)
+    symbols = sm.symbols(tuple(params))
+    homogeneous = sm.simplify(parsed.subs({p: 0 for p in symbols})) == 0
+    linear = all(sm.simplify(sm.diff(parsed, p, q)) == 0 for p in symbols for q in symbols)
+    if not (homogeneous and linear):
+        raise ValueError(
+            f"parametrisation {expr!r} is not linear and homogeneous in its coefficients, so the "
+            "coefficients cannot be remapped directly; render it and use remap_image instead"
+        )
+
+
+def remap_coefficients(
+    coeffs: np.ndarray,
+    y_index: np.ndarray,
+    x_index: np.ndarray,
+    expr: str,
+    params: list[str],
+    *,
+    nxi: int,
+    nyi: int,
+    cellxi: float,
+    cellyi: float,
+    x0i: float,
+    y0i: float,
+    nxo: int,
+    nyo: int,
+    cellxo: float,
+    cellyo: float,
+    x0o: float,
+    y0o: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Remap the coefficients of a linear parametrisation onto another grid (box kernel).
+
+    Rendering the result on the output grid equals ``remap_image(kernel="box")`` of the
+    rendering on the input grid, at every time and frequency. No dense cube is built. The
+    tent kernel is not offered: its limiter is nonlinear in the image.
+
+    Args:
+        coeffs: Shape ``(nstokes, npar, ncomps)``.
+        y_index, x_index: Component pixel locations on the input grid, shape ``(ncomps,)``.
+        expr: The stored sympy parametrisation.
+        params: Its coefficient names.
+        nxi, nyi, cellxi, cellyi, x0i, y0i: Input grid.
+        nxo, nyo, cellxo, cellyo, x0o, y0o: Output grid.
+
+    Returns:
+        ``(coeffs_out, y_index_out, x_index_out)``. The output components are the output pixels
+        non-zero in any ``(stokes, par)`` plane, in row-major (``np.where``) order.
+
+    Raises:
+        ValueError: If ``expr`` is not linear and homogeneous in ``params``, or on an invalid grid.
+    """
+    _check_linear(expr, params)
+    _check_geometry(nxi, nyi, cellxi, cellyi, nxo, nyo, cellxo, cellyo)
+    nstokes, npar, _ = coeffs.shape
+    wx, _ = _axis_weights(nxi, cellxi, x0i, nxo, cellxo, x0o)
+    wy, _ = _axis_weights(nyi, cellyi, y0i, nyo, cellyo, y0o)
+    # columns of the weights at the component locations: (nyo, ncomps) and (nxo, ncomps)
+    wyc = wy.tocsc()[:, np.asarray(y_index)]
+    wxc = wx.tocsc()[:, np.asarray(x_index)]
+
+    # each (stokes, par) plane as sparse (flat output index, value) pairs
+    planes = []
+    for s in range(nstokes):
+        for p in range(npar):
+            plane = (wyc @ sparse.diags_array(coeffs[s, p]) @ wxc.T).tocoo()
+            nz = plane.data != 0
+            planes.append((plane.row[nz].astype(np.int64) * nxo + plane.col[nz], plane.data[nz]))
+    union = np.unique(np.concatenate([lin for lin, _ in planes]))
+    coeffs_out = np.zeros((nstokes, npar, union.size), dtype=float)
+    for k, (lin, data) in enumerate(planes):
+        coeffs_out[k // npar, k % npar, np.searchsorted(union, lin)] = data
+    y_out, x_out = np.divmod(union, nxo)
+    return coeffs_out, y_out, x_out

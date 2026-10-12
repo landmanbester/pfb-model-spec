@@ -7,7 +7,8 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from pfb_model_spec.utils.remap import KERNELS, _axis_weights, remap_image
+from pfb_model_spec.utils.modelspec import eval_coeffs_to_cube, fit_image_cube
+from pfb_model_spec.utils.remap import KERNELS, _axis_weights, remap_coefficients, remap_image
 
 NX, NY = 32, 24
 
@@ -191,3 +192,52 @@ def test_tent_stays_positive_on_steep_emission():
     image = np.random.default_rng(6).random((NY, NX)) ** 8
     out = remap_image(image, kernel="tent", **_grid(NX, NY, 1.0, 80, 61, 0.43, x0o=0.17, y0o=-0.29))
     assert out.min() >= -1e-12 * image.max()
+
+
+COEFF_GRID = _grid(30, 20, 1.0, 22, 17, 1.7, cellyo=1.3, x0o=0.37, y0o=-0.2)
+
+
+def _fitted_components(seed=3):
+    """Twelve random components, two Stokes planes, four bands, a 3-term Legendre fit."""
+    rng = np.random.default_rng(seed)
+    freq = np.linspace(1.0e9, 1.6e9, 4)
+    cube = np.zeros((1, freq.size, 2, 20, 30))
+    ys, xs = rng.integers(0, 20, 12), rng.integers(0, 30, 12)
+    cube[0, :, :, ys, xs] = rng.random((12, freq.size, 2))
+    return fit_image_cube(np.array([0.0]), freq, cube, nbasisf=3, method="Legendre")
+
+
+def test_remap_coefficients_matches_remapping_the_rendered_image():
+    """Linearity: remap-then-render equals render-then-remap at any (time, freq)."""
+    coeffs, yi, xi, expr, params, texpr, fexpr = _fitted_components()
+    c2, y2, x2 = remap_coefficients(coeffs, yi, xi, expr, params, **COEFF_GRID)
+    assert c2.shape[:2] == coeffs.shape[:2]
+    assert y2.shape == x2.shape == (c2.shape[2],)
+    time = np.array([0.0])
+    freqs = np.array([1.0e9, 1.13e9, 1.6e9])  # includes a frequency between fitted bands
+    src = eval_coeffs_to_cube(time, freqs, 30, 20, coeffs, yi, xi, expr, params, texpr, fexpr)
+    dst = eval_coeffs_to_cube(time, freqs, 22, 17, c2, y2, x2, expr, params, texpr, fexpr)
+    assert_allclose(dst, remap_image(src, kernel="box", **COEFF_GRID), atol=1e-12)
+
+
+def test_remap_coefficients_orders_components_like_np_where():
+    coeffs, yi, xi, expr, params, *_ = _fitted_components()
+    _, y2, x2 = remap_coefficients(coeffs, yi, xi, expr, params, **COEFF_GRID)
+    order = y2 * COEFF_GRID["nxo"] + x2
+    assert np.all(np.diff(order) > 0)
+
+
+def test_remap_coefficients_empty_model():
+    coeffs = np.zeros((1, 3, 0))
+    empty = np.array([], dtype=np.int64)
+    params = ["t0", "f1", "f2"]
+    c2, y2, x2 = remap_coefficients(coeffs, empty, empty, "t0 + f*f1 + f**2*f2", params, **COEFF_GRID)
+    assert c2.shape == (1, 3, 0)
+    assert y2.size == x2.size == 0
+
+
+@pytest.mark.parametrize("expr", ["t0*exp(f1*f)", "t0 + f1*f + 1", "t0*f1"])
+def test_remap_coefficients_rejects_nonlinear_parametrisations(expr):
+    coeffs = np.ones((1, 2, 1))
+    with pytest.raises(ValueError, match="remap_image"):
+        remap_coefficients(coeffs, np.array([3]), np.array([4]), expr, ["t0", "f1"], **COEFF_GRID)
