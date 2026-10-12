@@ -195,6 +195,32 @@ def model_geometry(model_ds: xr.Dataset) -> dict[str, Any]:
     }
 
 
+def model_sampling(model_ds: xr.Dataset) -> dict[str, Any]:
+    """The optional sampling fields a `.mds` records (spec 0.1).
+
+    Consumers derive defaults from these (for example a degridding chunk that
+    spans one imaging band). Every field is optional in the spec, so each is
+    ``None`` when absent -- including on any upgraded genesis `.mds`.
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+
+    Returns:
+        ``{"freq_bounds", "time_bounds", "weights", "flux_scale"}``; arrays are
+        ``(nfreq, 2)``, ``(ntime, 2)`` and ``(nstokes, ntime, nfreq)``.
+
+    Raises:
+        ValueError: If the `.mds` spec is unknown or newer (from `upgrade`).
+    """
+    ds = upgrade(model_ds)
+    return {
+        "freq_bounds": ds.freq_bounds.values if "freq_bounds" in ds.variables else None,
+        "time_bounds": ds.time_bounds.values if "time_bounds" in ds.variables else None,
+        "weights": ds.weights.values if "weights" in ds.variables else None,
+        "flux_scale": ds.attrs.get("flux_scale"),
+    }
+
+
 def render_model_region(
     model_ds: xr.Dataset,
     *,

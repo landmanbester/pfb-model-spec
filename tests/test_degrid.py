@@ -518,3 +518,22 @@ def test_genesis_model_degrids_like_its_x_major_render():
 def test_model_geometry_rejects_a_newer_spec():
     with pytest.raises(ValueError, match="needs pfb-model-spec"):
         model_geometry(genesis_dataset(spec="9.9"))
+
+
+def test_model_sampling_reads_present_and_absent_fields():
+    from pfb_model_spec.utils.degrid import model_sampling
+
+    freq = np.array([1.0e9, 1.1e9])
+    fb = np.array([[0.95e9, 1.05e9], [1.05e9, 1.15e9]])
+    ds = build_mds_dataset(
+        np.ones((1, 1, 1)), np.array([1]), np.array([2]), "t0", ["t0"], "t", "f",
+        np.array([0.0]), freq, 1e-5, 8, 8, 0.0, 0.0, False, False, False,
+        (0.0, 0.0), ["I"], "t", freq_bounds=fb, flux_scale="apparent",
+    )  # fmt: skip
+    s = model_sampling(ds)
+    np.testing.assert_allclose(s["freq_bounds"], fb)
+    assert s["time_bounds"] is None and s["weights"] is None
+    assert s["flux_scale"] == "apparent"
+
+    g = model_sampling(genesis_dataset())
+    assert all(v is None for v in g.values())

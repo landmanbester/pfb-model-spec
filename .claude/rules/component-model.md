@@ -27,6 +27,7 @@ From this, the model can be re-rendered to an image at any time, frequency, and 
   working; `pfbspec convert --input-mds IN --output-mds OUT` persists the same upgrade.
 - To add a spec: bump `SPEC_VERSION`, add the step to `_UPGRADES`, change
   `build_mds_dataset`, and add a frozen fixture for the old spec next to `tests/_genesis.py`.
+- Optional fields may be added to a spec before its release is tagged; after that, any schema change is a bump.
 
 ## Axis convention ((Y, X), spec 0.1)
 
@@ -53,19 +54,24 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
 ## The I/O API (`utils/io.py`)
 
 - `model_to_ds(time, freq, fsel, model, wgt, mds_name, cell_rad, nx, ny, x0, y0, flip_u, flip_v,
-  flip_w, radec, stokes, writer_version, nbasisf=None, method="Legendre", sigmasq=1e-6)` → fits
+  flip_w, radec, stokes, writer_version, nbasisf=None, method="Legendre", sigmasq=1e-6, *, freq_bounds=None, time_bounds=None, flux_scale=None)` → fits
   `model[fsel]` via `fit_image_cube`, writes the coefficients to `mds_name` (zarr, `mode="w"`), then
   re-renders the fit at every band in `freq` via `eval_coeffs_to_slice` and returns the resulting
   cube. `model` is `(nband, nstokes, ny, nx)`, `wgt` `(nband, nstokes)`, `stokes` a `list[str]`,
   and the return is `(nband, nstokes, ny, nx)` (see "Axis convention"; no transpose). This is
   what pfb-imaging's `deconv.py` calls each minor cycle to persist and re-evaluate the component
   model — geometry (`x0`/`y0`/flips) is a gridder concern (`wgridder_conventions`) and is passed in
-  rather than computed, so `io.py` has no dependency on `pfb_imaging`.
+  rather than computed, so `io.py` has no dependency on `pfb_imaging`. The keyword-only
+  `freq_bounds`/`time_bounds`/`flux_scale` are forwarded to `build_mds_dataset`; `weights` is always
+  written from `wgt`, zero outside `fsel`. An all-zero model writes an empty (`comps == 0`) `.mds`
+  that renders to zeros.
 - `build_mds_dataset(coeffs, y_index, x_index, expr, params, texpr, fexpr, time, freq, cell_rad,
-  nx, ny, x0, y0, flip_u, flip_v, flip_w, radec, stokes, writer_version)` → the **single owner of the
+  nx, ny, x0, y0, flip_u, flip_v, flip_w, radec, stokes, writer_version, *, freq_bounds=None, time_bounds=None, weights=None, flux_scale=None)` → the **single owner of the
   `.mds` schema**: assembles the `xarray.Dataset` (data_vars/coords/attrs below) but does not write
   it. Both `model_to_ds` and the `model2comps` converter build through here, so the two write paths
-  cannot drift from each other or from `model_from_mds`'s reader.
+  cannot drift from each other or from `model_from_mds`'s reader. The keyword-only sampling fields
+  are validated (`freq_bounds` `(nfreq, 2)`, `time_bounds` `(ntime, 2)`, `weights`
+  `(nstokes, ntime, nfreq)`, `flux_scale` in `{"intrinsic", "apparent"}`) and omitted when `None`.
 
 ## The degrid API (`utils/degrid.py`)
 
@@ -77,6 +83,9 @@ distribution and the MS write belong to the calling application (pfb-imaging's
 - `model_geometry(model_ds)` → the `.mds` gridding attrs as a dict (`nx`, `ny`, `cell_rad`,
   `x0`, `y0`, `flip_u/v/w`, `stokes`; `stokes` is a list). Callers pass these to `degrid_stokes` rather than
   reading attrs by hand; raises on non-square pixels.
+- `model_sampling(model_ds)` → the optional sampling fields as a dict (`freq_bounds`, `time_bounds`,
+  `weights`, `flux_scale`), each `None` when absent (always the case for an upgraded genesis `.mds`).
+  Consumers derive defaults from these, e.g. a degrid chunk spanning one imaging band.
 - `render_model_region(model_ds, *, time, freq_out, nx=…, ny=…, cell_rad=…, x0=…, y0=…)` →
   `(nstokes, ny, nx)`. Wraps `eval_coeffs_to_slice`; the output grid defaults to the model's
   own. `freq_out` may lie between fitted bands — that continuity is what lets a consumer predict
@@ -161,6 +170,10 @@ Owned by `build_mds_dataset`; `open_mds`/`model_from_mds` read it, so the field 
 | rendered cubes | x-major `(…, nx, ny)` | `(…, ny, nx)`, matching FITS/astropy |
 | version attr | `pfb-imaging-version` | `writer-version` |
 | `spec` attr | `"genesis"` (or missing) | `"0.1"` |
+| `freq_bounds` | absent | optional, absent in genesis; coord, dims `(f, bound)`, `[lo, hi]` Hz per band |
+| `time_bounds` | absent | optional, absent in genesis; coord, dims `(t, bound)` |
+| `weights` | absent | optional, absent in genesis; dims `(stokes, t, f)`, fit weights, 0 = no data |
+| `flux_scale` attr | absent | optional, absent in genesis; `"intrinsic"` or `"apparent"` |
 
 Unchanged attrs: `parametrisation`, `texpr`, `fexpr`, `cell_rad_x`, `cell_rad_y`, `npix_x`,
 `npix_y`, `center_x`, `center_y`, `ra`, `dec`, `flip_u`, `flip_v`, `flip_w`.
