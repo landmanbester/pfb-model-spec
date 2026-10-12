@@ -7,6 +7,10 @@ a 1-D remap along x (the last axis) followed by one along y.
 
 Kernels:
     ``"box"``: brightness is uniform within each input pixel (first-order conservative).
+    ``"tent"``: brightness is linear within each input pixel, with a minmod-limited slope
+        (second-order conservative). It is positive and the identity on the same grid; an
+        isolated component gets zero slope, so it is never smeared. The limiter makes it
+        nonlinear in the image, and the x-then-y order makes it very slightly anisotropic.
 
 Flux from input pixels outside the output footprint is dropped, never wrapped.
 """
@@ -14,7 +18,7 @@ Flux from input pixels outside the output footprint is dropped, never wrapped.
 import numpy as np
 from scipy import sparse
 
-KERNELS = ("box",)
+KERNELS = ("box", "tent")
 
 # pixel edges this close to an integer (in output-pixel units) are snapped onto it, so that
 # integer shifts and exact cell ratios produce exact weights instead of 1e-16 slivers
@@ -59,10 +63,21 @@ def _axis_weights(
     return w, m
 
 
-def _remap_axis(image: np.ndarray, axis: int, w: sparse.csr_array) -> np.ndarray:
+def _minmod_slopes(u: np.ndarray) -> np.ndarray:
+    """Minmod-limited slopes along axis 0 of ``u``, with zero flux beyond both ends."""
+    padded = np.pad(u, ((1, 1), (0, 0)))
+    fwd = padded[2:] - padded[1:-1]
+    bwd = padded[1:-1] - padded[:-2]
+    return np.where(fwd * bwd > 0, np.sign(fwd) * np.minimum(np.abs(fwd), np.abs(bwd)), 0.0)
+
+
+def _remap_axis(image: np.ndarray, axis: int, w: sparse.csr_array, m: sparse.csr_array, kernel: str) -> np.ndarray:
     moved = np.moveaxis(image, axis, 0)
     flat = moved.reshape(moved.shape[0], -1)
     out = w @ flat
+    if kernel == "tent":
+        # within input pixel i the flux density is u_i + s_i q, so the overlap gets W u + M s
+        out = out + m @ _minmod_slopes(flat)
     return np.moveaxis(out.reshape((w.shape[0],) + moved.shape[1:]), 0, axis)
 
 
@@ -121,6 +136,7 @@ def remap_image(
         raise ValueError(f"image must have trailing shape (nyi, nxi) = {(nyi, nxi)}, got {image.shape}")
     if (nxi, nyi, cellxi, cellyi, x0i, y0i) == (nxo, nyo, cellxo, cellyo, x0o, y0o):
         return image.copy()
-    wx, _ = _axis_weights(nxi, cellxi, x0i, nxo, cellxo, x0o)
-    wy, _ = _axis_weights(nyi, cellyi, y0i, nyo, cellyo, y0o)
-    return _remap_axis(_remap_axis(image, -1, wx), -2, wy)
+    wx, mx = _axis_weights(nxi, cellxi, x0i, nxo, cellxo, x0o)
+    wy, my = _axis_weights(nyi, cellyi, y0i, nyo, cellyo, y0o)
+    out = _remap_axis(image, -1, wx, mx, kernel)
+    return _remap_axis(out, -2, wy, my, kernel)

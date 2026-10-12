@@ -142,3 +142,52 @@ def test_rejects_invalid_arguments(override, match):
 def test_rejects_mismatched_image_shape():
     with pytest.raises(ValueError, match="trailing shape"):
         remap_image(np.zeros((NX, NY)), **_grid(NX, NY, 1.0, NX, NY, 2.0))
+
+
+def test_kernels_are_box_and_tent():
+    assert KERNELS == ("box", "tent")
+
+
+def test_tent_leaves_an_isolated_component_unsmeared():
+    """Neighbour differences of a lone pixel have opposite signs, so minmod gives zero slope."""
+    image = np.zeros((10, 12))
+    image[4, 6] = 1.0
+    geometry = _grid(12, 10, 1.0, 48, 40, 0.25, x0o=0.1, y0o=0.03)
+    box = remap_image(image, kernel="box", **geometry)
+    tent = remap_image(image, kernel="tent", **geometry)
+    assert_allclose(tent, box, atol=1e-15)
+    assert tent.sum() == pytest.approx(1.0, abs=1e-14)
+
+
+def test_tent_reproduces_a_linear_ramp_exactly():
+    """Brightness rising linearly in x, constant in y, refined x2 onto aligned half-pixels."""
+    n, ny = 8, 6
+    image = np.tile(1.0 + np.arange(n), (ny, 1))
+    # offsets of -1/4 input pixel align the output halves with the input pixels
+    out = remap_image(image, kernel="tent", **_grid(n, ny, 1.0, 2 * n, 2 * ny, 0.5, x0o=-0.25, y0o=-0.25))
+    # within pixel i the flux density is u_i + q (q in [-1/2, 1/2]); each half spans 1/2 in y too
+    expected = np.zeros((2 * ny, 2 * n))
+    expected[:, 0::2] = (image[0] / 2 - 1 / 8) / 2
+    expected[:, 1::2] = (image[0] / 2 + 1 / 8) / 2
+    # the last input column borders zero flux, so the limiter flattens it there
+    assert_allclose(out[:, :-2], expected[:, :-2], rtol=1e-13)
+    box = remap_image(image, kernel="box", **_grid(n, ny, 1.0, 2 * n, 2 * ny, 0.5, x0o=-0.25, y0o=-0.25))
+    assert not np.allclose(box[:, :-2], expected[:, :-2])
+
+
+def test_tent_refines_smooth_emission_better_than_box():
+    """Block-sum a fine Gaussian onto a x4 coarser grid, then remap it back to the fine grid."""
+    xf = np.arange(64) - 32
+    xx, yy = np.meshgrid(xf, xf)
+    fine = np.exp(-((xx - 2.3) ** 2 + (yy + 1.1) ** 2) / (2 * 6.0**2))
+    coarse = fine.reshape(16, 4, 16, 4).sum(axis=(1, 3))
+    # x0i = 1.5 aligns the coarse pixel edges with every fourth fine pixel edge
+    geometry = _grid(16, 16, 4.0, 64, 64, 1.0, x0i=1.5, y0i=1.5)
+    err = {k: np.abs(remap_image(coarse, kernel=k, **geometry) - fine).sum() / fine.sum() for k in ("box", "tent")}
+    assert err["tent"] < 0.5 * err["box"]
+
+
+def test_tent_stays_positive_on_steep_emission():
+    image = np.random.default_rng(6).random((NY, NX)) ** 8
+    out = remap_image(image, kernel="tent", **_grid(NX, NY, 1.0, 80, 61, 0.43, x0o=0.17, y0o=-0.29))
+    assert out.min() >= -1e-12 * image.max()
