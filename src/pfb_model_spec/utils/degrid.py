@@ -231,6 +231,7 @@ def render_model_region(
     cell_rad: float | None = None,
     x0: float | None = None,
     y0: float | None = None,
+    kernel: str = "box",
 ) -> np.ndarray:
     """Render a component model to an image at one time and frequency.
 
@@ -239,15 +240,8 @@ def render_model_region(
     consumer predict at finer spectral resolution than the imaging run used.
 
     The output grid defaults to the model's own. Supplying a different one
-    resamples via ``eval_coeffs_to_slice``.
-
-    Note:
-        Resampling to a **coarser** grid is not flux-conserving for the point
-        components a `.mds` stores: ``eval_coeffs_to_slice`` applies an
-        ``area_ratio`` factor appropriate to a surface-brightness field, which
-        inflates a point component's flux by exactly that factor (measured:
-        coarsen x2 -> x4, coarsen x4 -> x16; refining and same-grid are exact).
-        Degridding always uses the model's own grid and so is unaffected.
+    remaps via ``eval_coeffs_to_slice``, which conserves flux whether the grid
+    is refined, coarsened or shifted; flux outside the output grid is dropped.
 
     Args:
         model_ds: An opened `.mds` dataset.
@@ -258,6 +252,9 @@ def render_model_region(
         cell_rad: Output pixel size in radians. Defaults to the model's.
         x0: Output phase-centre x offset. Defaults to the model's ``center_x``.
         y0: Output phase-centre y offset. Defaults to the model's ``center_y``.
+        kernel: Remap kernel for a different output grid: ``"box"``
+            (piecewise-constant) or ``"tent"`` (minmod-limited piecewise-linear,
+            smoother when refining extended emission).
 
     Returns:
         The rendered image, shape ``(nstokes, ny, nx)``, one plane per entry of
@@ -302,6 +299,7 @@ def render_model_region(
         cellyo=cellyo,
         x0o=x0o,
         y0o=y0o,
+        kernel=kernel,
     )
 
 
@@ -362,8 +360,7 @@ def model_to_apparent_vis_for_region(
     of the chain.
 
     The model is always rendered on its own grid, taken from the `.mds` attrs,
-    so no resampling occurs (see :func:`render_model_region` on why resampling
-    to a coarser grid would not conserve flux).
+    so no resampling occurs.
 
     Args:
         model_ds: An opened `.mds` dataset.

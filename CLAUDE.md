@@ -68,7 +68,7 @@ src/pfb_model_spec/
 ├── _container_image.py    # CONTAINER_IMAGE — single source of truth for the image tag
 ├── cli/                   # lightweight Typer wrappers — generate-cabs parses these
 ├── core/                  # heavy implementations mirroring cli/ commands (one per command)
-├── utils/                 # spec.py (versions/upgrade) + modelspec.py (fit/render) + io.py (.mds write/re-render) + fits.py (portable FITS I/O)
+├── utils/                 # spec.py (versions/upgrade) + modelspec.py (fit/render) + remap.py (flux-conserving regrid) + io.py (.mds write/re-render) + fits.py (portable FITS I/O)
 └── cabs/                  # AUTO-GENERATED Stimela YAMLs — never hand-edit
 tests/                     # synthetic, MS-free tests (+ _synth.py helpers)
 ```

@@ -2,10 +2,10 @@ from collections.abc import Callable
 
 import numpy as np
 import sympy as sm
-from scipy.interpolate import RegularGridInterpolator
 from sympy.parsing.sympy_parser import parse_expr
 from sympy.utilities.lambdify import lambdify
 
+from pfb_model_spec.utils.remap import remap_image
 from pfb_model_spec.utils.spec import open_mds
 
 
@@ -168,95 +168,37 @@ def eval_coeffs_to_slice(
     cellyo,
     x0o,
     y0o,
+    kernel="box",
 ):
     """Render coefficients at one (time, freq) onto an arbitrary output grid.
 
-    Returns ``(nstokes, nyo, nxo)``. The geometry is keyword-only so that a call written
-    against the old x-major positional signature fails loudly instead of swapping axes.
+    The components are rendered on their own grid, then remapped onto the output grid with
+    :func:`pfb_model_spec.utils.remap.remap_image`, which conserves flux (``kernel`` is
+    ``"box"`` or ``"tent"``). Returns ``(nstokes, nyo, nxo)``. The geometry is keyword-only so
+    that a call written against the old x-major positional signature fails loudly instead of
+    swapping axes.
     """
     modelf, tfunc, ffunc = _model_functions(expr, paramf, texpr, fexpr)
     tval, fval = tfunc(time), ffunc(freq)
-    out = np.zeros((coeffs.shape[0], nyo, nxo), dtype=float)
+    image_in = np.zeros((coeffs.shape[0], nyi, nxi), dtype=float)
     for s in range(coeffs.shape[0]):
-        image_in = np.zeros((nxi, nyi), dtype=float)
-        image_in[x_index, y_index] = modelf(tval, fval, *coeffs[s])
-        # resampling works x-major internally; transpose once on the way out
-        out[s] = _resample_xmajor(image_in, nxi, nyi, cellxi, cellyi, x0i, y0i, nxo, nyo, cellxo, cellyo, x0o, y0o).T
-    return out
-
-
-def _resample_xmajor(
-    image_in: np.ndarray,
-    nxi: int,
-    nyi: int,
-    cellxi: float,
-    cellyi: float,
-    x0i: float,
-    y0i: float,
-    nxo: int,
-    nyo: int,
-    cellxo: float,
-    cellyo: float,
-    x0o: float,
-    y0o: float,
-) -> np.ndarray:
-    """Zero-pad and bilinearly resample an x-major ``(nxi, nyi)`` slice onto ``(nxo, nyo)``."""
-    pix_area_in = cellxi * cellyi
-    pix_area_out = cellxo * cellyo
-    area_ratio = pix_area_out / pix_area_in
-
-    xin = (-(nxi // 2) + np.arange(nxi)) * cellxi + x0i
-    yin = (-(nyi // 2) + np.arange(nyi)) * cellyi + y0i
-    xo = (-(nxo // 2) + np.arange(nxo)) * cellxo + x0o
-    yo = (-(nyo // 2) + np.arange(nyo)) * cellyo + y0o
-
-    # how many pixels to pad by to extrapolate with zeros
-    xldiff = xin.min() - xo.min()
-    if xldiff > 0.0:
-        npadxl = int(np.ceil(xldiff / cellxi))
-    else:
-        npadxl = 0
-    yldiff = yin.min() - yo.min()
-    if yldiff > 0.0:
-        npadyl = int(np.ceil(yldiff / cellyi))
-    else:
-        npadyl = 0
-
-    xudiff = xo.max() - xin.max()
-    if xudiff > 0.0:
-        npadxu = int(np.ceil(xudiff / cellxi))
-    else:
-        npadxu = 0
-    yudiff = yo.max() - yin.max()
-    if yudiff > 0.0:
-        npadyu = int(np.ceil(yudiff / cellyi))
-    else:
-        npadyu = 0
-
-    do_pad = npadxl > 0
-    do_pad |= npadxu > 0
-    do_pad |= npadyl > 0
-    do_pad |= npadyu > 0
-    if do_pad:
-        image_in = np.pad(image_in, ((npadxl, npadxu), (npadyl, npadyu)), mode="constant")
-
-        xin = (-(nxi // 2 + npadxl) + np.arange(nxi + npadxl + npadxu)) * cellxi + x0i
-        nxi = nxi + npadxl + npadxu
-        yin = (-(nyi // 2 + npadyl) + np.arange(nyi + npadyl + npadyu)) * cellyi + y0i
-        nyi = nyi + npadyl + npadyu
-
-    do_interp = cellxi != cellxo
-    do_interp |= cellyi != cellyo
-    do_interp |= x0i != x0o
-    do_interp |= y0i != y0o
-    do_interp |= nxi != nxo
-    do_interp |= nyi != nyo
-    if do_interp:
-        interpo = RegularGridInterpolator((xin, yin), image_in, bounds_error=True, method="linear")
-        xx, yy = np.meshgrid(xo, yo, indexing="ij")
-        return interpo((xx, yy)) * area_ratio
-    else:
-        return image_in
+        image_in[s, y_index, x_index] = modelf(tval, fval, *coeffs[s])
+    return remap_image(
+        image_in,
+        kernel=kernel,
+        nxi=nxi,
+        nyi=nyi,
+        cellxi=cellxi,
+        cellyi=cellyi,
+        x0i=x0i,
+        y0i=y0i,
+        nxo=nxo,
+        nyo=nyo,
+        cellxo=cellxo,
+        cellyo=cellyo,
+        x0o=x0o,
+        y0o=y0o,
+    )
 
 
 def model_from_mds(mds_name, freqs=None):
