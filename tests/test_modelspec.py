@@ -17,6 +17,7 @@ from pfb_model_spec.utils.modelspec import (
     fit_image_cube,
     model_from_mds,
 )
+from pfb_model_spec.utils.remap import remap_coefficients
 from tests._genesis import FREQS, NX, NY, genesis_cube, genesis_dataset
 from tests._synth import gaussian2d, give_edges
 
@@ -103,7 +104,7 @@ def test_time_and_frequency_fit_is_exact(method):
     assert_allclose(image, cube, atol=1e-8)
 
 
-@pytest.mark.parametrize("method", ["Legendre", "poly", "fakenodes"])
+@pytest.mark.parametrize("method", ["Legendre", "poly", "fakenodes", "box", "tent"])
 def test_single_time_single_band_returns_the_data(method):
     """Nothing to fit: the pixel values are the coefficients, even with sigmasq set."""
     cube = np.zeros((1, 1, 2, 4, 6))
@@ -193,6 +194,103 @@ def test_fakenodes_rejects_misshapen_bounds():
     freq = np.array([1.0e9, 1.1e9, 1.2e9])
     with pytest.raises(ValueError, match="bounds"):
         fit_image_cube(np.array([0.0]), freq, cube, method="fakenodes", freq_bounds=np.ones((2, 2)))
+
+
+def _sub_band(edges, nsub):
+    """``nsub`` equal sub-cell midpoints per band: their mean of a linear piece is its band average."""
+    frac = (np.arange(nsub) + 0.5) / nsub
+    return (edges[:-1, None] + frac[None, :] * np.diff(edges)[:, None]).ravel()
+
+
+def _histo_render(edges, cube, nsub=64, **fit_kwargs):
+    """Fit band averages ``(nband, ny, nx)`` and render ``nsub`` sub-bands per band."""
+    freq = (edges[:-1] + edges[1:]) / 2
+    rendered = _channel_render(freq, cube, _sub_band(edges, nsub), **fit_kwargs)
+    return rendered.reshape(freq.size, nsub, *cube.shape[1:])
+
+
+def test_tent_reproduces_band_averages_and_keeps_their_sign():
+    """Sparse, spiky, non-negative band values: exact band averages and no negative excursions."""
+    nband = 10
+    edges = np.linspace(0.856e9, 1.712e9, nband + 1)
+    rng = np.random.default_rng(7)
+    values = rng.random((nband, 2, 3)) * (rng.random((nband, 2, 3)) > 0.4)
+    cube = np.concatenate([values, -values], axis=1)  # a non-negative and a non-positive plane
+    sub = _histo_render(edges, cube, method="tent")
+    assert_allclose(sub.mean(axis=1), cube, atol=1e-12)
+    assert sub[:, :, :2].min() >= 0 and sub[:, :, 2:].max() <= 0
+
+
+def test_tent_is_second_order_on_a_smooth_spectrum():
+    """No edge bias to speak of: unlike fake nodes, the outer half-bands are as good as the rest."""
+    nband, nsub = 16, 256
+    edges = np.linspace(0.856e9, 1.712e9, nband + 1)
+    chan = _sub_band(edges, nsub)
+    truth = (chan / 1.284e9) ** (-0.7 - 0.3 * np.log(chan / 1.284e9))
+    cube = np.zeros((nband, 2, 2))
+    cube[:, 1, 0] = truth.reshape(nband, nsub).mean(axis=1)
+    tent = _histo_render(edges, cube, nsub=nsub, method="tent")[:, :, 1, 0].ravel()
+    fake = _histo_render(edges, cube, nsub=nsub, method="fakenodes")[:, :, 1, 0].ravel()
+    assert np.abs(tent - truth).max() < 5e-4 * truth.max()
+    assert np.abs(fake - truth).max() > 10 * np.abs(tent - truth).max()
+
+
+def test_box_holds_each_band_value():
+    edges = np.array([1.0e9, 1.1e9, 1.3e9, 1.4e9])
+    cube = np.zeros((3, 2, 2))
+    cube[:, 0, 1] = [1.0, 3.0, 2.0]
+    bounds = np.stack([edges[:-1], edges[1:]], axis=1)
+    sub = _histo_render(edges, cube, method="box", freq_bounds=bounds)
+    assert_allclose(sub, np.broadcast_to(cube[:, None], sub.shape), atol=1e-12)
+
+
+def test_tent_does_not_smear_an_isolated_component():
+    edges = np.linspace(1.0e9, 1.8e9, 9)
+    cube = np.zeros((8, 2, 2))
+    cube[3, 1, 1] = 1.0
+    tent = _histo_render(edges, cube, method="tent")
+    assert_allclose(tent, _histo_render(edges, cube, method="box"), atol=1e-12)
+
+
+def test_tent_honours_non_uniform_bounds():
+    edges = np.array([0.9e9, 1.0e9, 1.25e9, 1.3e9, 1.6e9])
+    cube = np.zeros((4, 2, 2))
+    cube[:, 0, 0] = [4.0, 3.0, 2.5, 1.0]
+    bounds = np.stack([edges[:-1], edges[1:]], axis=1)
+    sub = _histo_render(edges, cube, method="tent", freq_bounds=bounds)
+    assert_allclose(sub.mean(axis=1), cube, atol=1e-12)
+    assert sub.min() >= 0
+
+
+def test_histopolation_drops_bands_without_weight():
+    """A band with zero weight in every Stokes plane is ignored; its neighbours span the gap."""
+    nband = 5
+    freq = np.linspace(1.0e9, 1.4e9, nband)
+    cube = np.zeros((1, nband, 1, 2, 2))
+    cube[0, :, 0, 1, 1] = [1.0, 1.0, 100.0, 1.0, 1.0]
+    wgt = np.ones((1, nband, 1))
+    wgt[0, 2] = 0.0
+    out = fit_image_cube(np.array([0.0]), freq, cube, wgt=wgt, method="tent")
+    chan = np.linspace(0.9e9, 1.5e9, 61)
+    image = eval_coeffs_to_cube(np.array([0.0]), chan, 2, 2, *out)
+    assert_allclose(image[0, :, 0, 1, 1], 1.0, atol=1e-12)
+
+
+def test_histopolation_needs_a_single_time():
+    cube = np.ones((2, 3, 1, 2, 2))
+    with pytest.raises(NotImplementedError, match="ntime"):
+        fit_image_cube(np.array([0.0, 1.0]), np.array([1.0e9, 1.1e9, 1.2e9]), cube, method="tent")
+
+
+def test_tent_coefficients_can_be_remapped():
+    """The parametrisation is linear in its coefficients, so the coefficient shortcut applies."""
+    freq = np.linspace(1.0e9, 1.3e9, 4)
+    cube = np.zeros((1, 4, 1, 4, 6))
+    cube[0, :, 0, 1, 2] = [1.0, 2.0, 2.5, 2.0]
+    coeffs, yi, xi, expr, params, *_ = fit_image_cube(np.array([0.0]), freq, cube, method="tent")
+    out, yo, xo = remap_coefficients(coeffs, yi, xi, expr, params, **_geometry(6, 4, 1e-5))
+    assert_allclose(out, coeffs)
+    assert list(yo) == list(yi) and list(xo) == list(xi)
 
 
 def test_poly_fit_with_a_single_band():

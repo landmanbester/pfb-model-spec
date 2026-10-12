@@ -57,6 +57,97 @@ def _fake_nodes(x: np.ndarray, sym: sm.Symbol, bounds: np.ndarray | None) -> tup
     return -np.cos(np.pi * (x - lo) / (hi - lo)), -sm.cos(sm.pi * (sym - lo) / (hi - lo))
 
 
+HISTOPOLATION = ("box", "tent")
+
+
+def _band_edges(freq: np.ndarray, bounds: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """Per-band ``(lo, hi)`` edges: ``bounds`` when given, else midway between centres.
+
+    Without bounds the outer edges lie half a spacing past the end centres.
+
+    Raises:
+        ValueError: If the bands are not increasing and non-overlapping, or ``bounds`` is
+            misshapen.
+    """
+    if bounds is None:
+        if freq.size == 1:
+            return freq.astype(float), freq.astype(float)
+        mid = (freq[1:] + freq[:-1]) / 2
+        lo = np.concatenate(([freq[0] - (freq[1] - freq[0]) / 2], mid))
+        hi = np.concatenate((mid, [freq[-1] + (freq[-1] - freq[-2]) / 2]))
+    else:
+        bounds = np.asarray(bounds, dtype=float)
+        if bounds.shape != (freq.size, 2):
+            raise ValueError(f"bounds must have shape ({freq.size}, 2), got {bounds.shape}")
+        lo, hi = bounds[:, 0], bounds[:, 1]
+    # contiguous bands built from floating-point channel edges may overlap by rounding
+    tol = 1e-9 * (hi - lo).max(initial=0.0)
+    if np.any(hi <= lo) or np.any(lo[1:] < hi[:-1] - tol):
+        raise ValueError("bands must be increasing and non-overlapping, with hi > lo")
+    return lo, hi
+
+
+def _tent_slopes(means: np.ndarray, centre: np.ndarray, half: np.ndarray) -> np.ndarray:
+    """Limited slopes, as the excursion from a band's mean to its edges (``(nband, ...)``).
+
+    Interior bands take the minmod of the neighbouring differences. The end bands take their
+    one-sided difference, clipped so that the outer edge keeps the sign of the band mean. Every
+    edge value then lies between zero and the neighbouring means, so non-negative band means
+    give a non-negative spectrum, and a band at a local extremum is flat.
+    """
+    slopes = np.zeros_like(means)
+    if means.shape[0] == 1:
+        return slopes
+    shape = (-1,) + (1,) * (means.ndim - 1)
+    diff = np.diff(means, axis=0) / np.diff(centre).reshape(shape)  # per Hz, between centres
+    fwd, bwd = diff[1:], diff[:-1]
+    slopes[1:-1] = np.where(fwd * bwd > 0, np.sign(fwd) * np.minimum(np.abs(fwd), np.abs(bwd)), 0.0)
+    slopes[0], slopes[-1] = diff[0], diff[-1]
+    slopes *= half.reshape(shape)
+    # outer edges: the low edge of the first band is m - s, the high edge of the last m + s;
+    # a zero mean has no sign to keep, so its band is flat
+    m0, m1 = means[0], means[-1]
+    slopes[0] = np.where(m0 > 0, np.minimum(slopes[0], m0), np.where(m0 < 0, np.maximum(slopes[0], m0), 0.0))
+    slopes[-1] = np.where(m1 > 0, np.maximum(slopes[-1], -m1), np.where(m1 < 0, np.minimum(slopes[-1], -m1), 0.0))
+    return slopes
+
+
+def _fit_histopolation(freq, image, wgt, freq_bounds, method):
+    """Fit ``(nband, nstokes, ny, nx)`` band averages piecewise over frequency (see ``fit_image_cube``)."""
+    f = sm.Symbol("f")
+    lo, hi = _band_edges(freq, freq_bounds)
+    keep = np.any(wgt != 0, axis=1)
+    if not keep.any():
+        raise ValueError("every band has zero weight")
+    lo, hi, image = lo[keep], hi[keep], image[keep]
+    nb, nstokes = image.shape[:2]
+
+    y_index, x_index = np.where(np.any(image, axis=(0, 1)))
+    means = image[:, :, y_index, x_index]  # (nb, nstokes, ncomps)
+    mparams = sm.symbols(f"m(0:{nb})")
+    if nb == 1:
+        # no width to vary over: the band mean is the model
+        return means.transpose(1, 0, 2), y_index, x_index, str(mparams[0]), [str(mparams[0])], "t", "f"
+
+    centre, half = (lo + hi) / 2, (hi - lo) / 2
+    terms = list(mparams)
+    coeffs = [means]
+    params = list(mparams)
+    if method == "tent":
+        sparams = sm.symbols(f"s(0:{nb})")
+        for b, sp in enumerate(sparams):
+            # q runs over [-1, 1] across the band and is held at its edge values outside it
+            q = sm.Min(sm.Max((f - float(centre[b])) / float(half[b]), -1), 1)
+            terms[b] = terms[b] + sp * q
+        coeffs.append(_tent_slopes(means, centre, half))
+        params += list(sparams)
+    # each band owns its own range; a gap between bands is split at its midpoint
+    breaks = (hi[:-1] + lo[1:]) / 2
+    expr = sm.Piecewise(*[(term, f < float(brk)) for term, brk in zip(terms[:-1], breaks)], (terms[-1], True))
+    coeffs = np.concatenate(coeffs, axis=0).transpose(1, 0, 2)
+    return coeffs, y_index, x_index, str(expr), [str(p) for p in params], "t", "f"
+
+
 def fit_image_cube(
     time,
     freq,
@@ -85,15 +176,23 @@ def fit_image_cube(
         nbasist: Number of time basis functions (default ``ntime``).
         nbasisf: Number of frequency basis functions, counting the shared constant
             (default ``nband``).
-        method: ``"poly"`` (monomials), ``"Legendre"``, or ``"fakenodes"`` (Chebyshev
-            polynomials of the cosine-mapped axis, see :func:`_fake_nodes`). Use
-            ``"fakenodes"`` to evaluate between or beyond the band centres: the polynomial
-            methods ring there (Runge's phenomenon) when ``nbasisf`` is close to ``nband``.
+        method: A basis -- ``"poly"`` (monomials), ``"Legendre"``, or ``"fakenodes"``
+            (Chebyshev polynomials of the cosine-mapped axis, see :func:`_fake_nodes`) -- or
+            a histopolation, ``"box"`` or ``"tent"``. The polynomial bases ring between band
+            centres (Runge's phenomenon) when ``nbasisf`` is close to ``nband``; fake nodes
+            does not, at the cost of an O(1/nband) bias near the outer band edges.
+            Histopolation treats each band value as the band's average: ``"box"`` holds it
+            across the band, ``"tent"`` adds a limited slope (see :func:`_tent_slopes`).
+            Both reproduce every band average exactly and keep non-negative bands
+            non-negative. They need ``ntime == 1``, ignore ``nbasist``/``nbasisf``/
+            ``sigmasq``, drop bands with zero weight in every Stokes plane, and hold the end
+            values beyond the outer edges.
         sigmasq: Ridge term added to the Hessian; ignored when ``ntime == nband == 1``
             (nothing to fit: the data are the coefficients, whatever the weights).
         time_bounds: Optional ``(ntime, 2)`` ``[lo, hi]`` per time bin; ``"fakenodes"`` only.
-        freq_bounds: Optional ``(nband, 2)`` ``[lo, hi]`` in Hz per band; ``"fakenodes"``
-            only. Without bounds the domain extends half a sample spacing past the ends.
+        freq_bounds: Optional ``(nband, 2)`` ``[lo, hi]`` in Hz per band, for
+            ``"fakenodes"``, ``"box"`` and ``"tent"``. Without bounds the band edges lie
+            midway between centres and half a spacing past the ends.
 
     Returns:
         ``(coeffs, y_index, x_index, expr, params, texpr, fexpr)``:
@@ -104,7 +203,7 @@ def fit_image_cube(
 
     Raises:
         ValueError: On inconsistent shapes or basis sizes.
-        NotImplementedError: For an unknown ``method``.
+        NotImplementedError: For an unknown ``method``, or histopolation with ``ntime > 1``.
     """
     from sympy.abc import f, t
 
@@ -121,6 +220,11 @@ def fit_image_cube(
     nbasisf = nband if nbasisf is None else nbasisf
     if not 1 <= nbasist <= ntime or not 1 <= nbasisf <= nband:
         raise ValueError(f"need 1 <= nbasist <= {ntime} and 1 <= nbasisf <= {nband}")
+
+    if method in HISTOPOLATION:
+        if ntime != 1:
+            raise NotImplementedError(f"method {method!r} needs ntime == 1, got {ntime}")
+        return _fit_histopolation(freq, image[0], wgt[0], freq_bounds, method)
 
     if method == "poly":
 

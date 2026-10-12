@@ -44,15 +44,19 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
   multi-Stokes cube. `image` is `(ntime, nband, nstokes, ny, nx)`, `wgt` `(ntime, nband, nstokes)`,
   `coeffs` `(nstokes, npar, ncomps)`. All Stokes planes share one basis and the union of non-zero
   locations. This is the only fit function (`fit_image_fscube` was removed; use `ntime = 1`).
-- `method` is `"poly"`, `"Legendre"` or `"fakenodes"` (#29). `"fakenodes"` fits Chebyshev
-  polynomials in `S(x) = -cos(pi (x - lo) / (hi - lo))`, the domain `[lo, hi]` being the outer
-  bin edges (`*_bounds`, else half a spacing past the end samples); `texpr`/`fexpr` carry the
-  map, so the schema is unchanged. Equispaced band centres land on the Chebyshev nodes, so
-  noise gain stays ~log(nband) instead of the polynomial's exponential Runge growth, and
-  channels in the outer half-bands are interpolated, not extrapolated. The price (unavoidable
-  for a stable method on equispaced data, per Platte–Trefethen–Kuijlaars) is an O(1/nband)
-  bias, largest near the outer edges where the map is flat. It is not positivity-preserving,
-  only nearly so.
+- `method` is a basis -- `"poly"`, `"Legendre"`, `"fakenodes"` -- or a histopolation, `"box"` /
+  `"tent"` (#29). The polynomial bases ring between band centres (Runge) when `nbasisf ≈ nband`.
+  `"fakenodes"` fits Chebyshev polynomials in `S(x) = -cos(pi (x - lo) / (hi - lo))` over the
+  outer bin edges (the map lives in `texpr`/`fexpr`): stable, but with an O(1/nband) bias
+  near the outer edges, where the map is flat.
+- **Histopolation** (`"box"`/`"tent"`) treats each band value as the band's *average*. The
+  `parametrisation` is a sympy `Piecewise` in `f`, linear in per-band means `m<b>` and (tent)
+  edge excursions `s<b>`, with the band edges baked in (`freq_bounds`, else midway between
+  centres), so the schema is unchanged and `remap_coefficients` applies. Tent slopes are
+  minmod-limited inside and sign-clipped at the outer edges: band averages are exact, the error
+  is O(1/nband²), and the sign of the data is kept (non-negative in, non-negative out). Needs
+  `ntime == 1`; ignores `nbasis*`/`sigmasq`; drops bands with zero weight in every plane; holds
+  the end values beyond the outer edges and splits gaps at their midpoint.
 - `eval_coeffs_to_cube(time, freq, nx, ny, coeffs, y_index, x_index, expr, paramf, texpr, fexpr)`
   → render coefficients to a `(ntime, nfreq, nstokes, ny, nx)` cube.
 - `eval_coeffs_to_slice(time, freq, coeffs, y_index, x_index, expr, paramf, texpr, fexpr, *, nxi,
@@ -65,7 +69,7 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
 ## The I/O API (`utils/io.py`)
 
 - `model_to_ds(time, freq, fsel, model, wgt, mds_name, cell_rad, nx, ny, x0, y0, flip_u, flip_v,
-  flip_w, radec, stokes, writer_version, nbasisf=None, method="fakenodes", sigmasq=1e-6, *, freq_bounds=None, time_bounds=None, flux_scale=None)` → fits
+  flip_w, radec, stokes, writer_version, nbasisf=None, method="tent", sigmasq=1e-6, *, freq_bounds=None, time_bounds=None, flux_scale=None)` → fits
   `model[fsel]` via `fit_image_cube`, writes the coefficients to `mds_name` (zarr, `mode="w"`), then
   re-renders the fit at every band in `freq` via `eval_coeffs_to_slice` and returns the resulting
   cube. `model` is `(nband, nstokes, ny, nx)`, `wgt` `(nband, nstokes)`, `stokes` a `list[str]`,
@@ -74,7 +78,7 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
   model — geometry (`x0`/`y0`/flips) is a gridder concern (`wgridder_conventions`) and is passed in
   rather than computed, so `io.py` has no dependency on `pfb_imaging`. The keyword-only
   `freq_bounds`/`time_bounds`/`flux_scale` are forwarded to `build_mds_dataset`
-  (`freq_bounds[fsel]`/`time_bounds` also set the `"fakenodes"` fit domain); `weights` is always
+  (`freq_bounds[fsel]` also gives the fit its band edges); `weights` is always
   written from `wgt`, zero outside `fsel`. An all-zero model writes an empty (`comps == 0`) `.mds`
   that renders to zeros.
 - `build_mds_dataset(coeffs, y_index, x_index, expr, params, texpr, fexpr, time, freq, cell_rad,

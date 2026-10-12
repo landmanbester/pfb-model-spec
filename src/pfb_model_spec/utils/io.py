@@ -158,7 +158,7 @@ def model_to_ds(
     stokes: list[str],
     writer_version: str,
     nbasisf: int | None = None,
-    method: str = "fakenodes",
+    method: str = "tent",
     sigmasq: float = 1e-6,
     *,
     freq_bounds: np.ndarray | None = None,
@@ -196,12 +196,12 @@ def model_to_ds(
         writer_version: pfb-model-spec (or caller) version to record in the `.mds` attrs.
         nbasisf: Number of frequency basis functions; defaults to `fit_image_cube`'s
             own default (number of fitted bands) when `None`.
-        method: Basis for the fit, forwarded to `fit_image_cube`. The default,
-            ``"fakenodes"``, does not ring between band centres, so the model can be
-            rendered at any frequency inside the fitted bands.
+        method: Fit method, forwarded to `fit_image_cube`. The default, ``"tent"``,
+            reproduces every band average, never rings and keeps a non-negative model
+            non-negative, so the model can be rendered at any frequency in the band.
         sigmasq: Regularisation, forwarded to `fit_image_cube`.
         freq_bounds: Optional ``(nband, 2)`` band edges in Hz, forwarded to `build_mds_dataset`;
-            ``freq_bounds[fsel]`` also sets the ``"fakenodes"`` fit domain.
+            ``freq_bounds[fsel]`` also gives the band edges to the fit.
         time_bounds: Optional ``(ntime, 2)`` time edges, forwarded to `build_mds_dataset` and,
             for ``"fakenodes"``, used as the time fit domain.
         flux_scale: Optional ``"intrinsic"`` or ``"apparent"``, forwarded to `build_mds_dataset`.

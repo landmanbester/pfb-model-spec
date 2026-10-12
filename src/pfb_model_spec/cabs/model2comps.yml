@@ -40,7 +40,7 @@ cabs:
           rich_help_panel: Fitting
       fit-mode:
         info:
-          'Basis for the frequency fit: Legendre, poly or fakenodes.'
+          'Frequency fit method: Legendre, poly, fakenodes, box or tent.'
         default: Legendre
         metadata:
           rich_help_panel: Fitting
