@@ -4,6 +4,8 @@ Cubes are (..., nstokes, ny, nx). Grids are deliberately non-square so that a sw
 axis cannot pass silently.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import sympy as sm
@@ -235,6 +237,41 @@ def test_tent_is_second_order_on_a_smooth_spectrum():
     assert np.abs(fake - truth).max() > 10 * np.abs(tent - truth).max()
 
 
+def test_tent_reproduces_band_values_at_off_centre_frequencies():
+    """pfb-imaging fits and renders at each band's weighted frequency, not its edge midpoint."""
+    nband = 8
+    edges = np.linspace(0.856e9, 1.712e9, nband + 1)
+    bounds = np.stack([edges[:-1], edges[1:]], axis=1)
+    feff = bounds.mean(axis=1) + np.diff(edges) / 2 * np.linspace(0.25, -0.25, nband)
+    rng = np.random.default_rng(33)
+    values = rng.random((nband, 2, 3)) * (rng.random((nband, 2, 3)) > 0.4)
+    values[:, 0, 0] = (feff / 1.284e9) ** -0.7
+    cube = np.concatenate([values, -values], axis=1)[None, :, None]
+    out = fit_image_cube(np.array([0.0]), feff, cube, method="tent", freq_bounds=bounds)
+    assert_allclose(eval_coeffs_to_cube(np.array([0.0]), feff, 3, 4, *out), cube, atol=1e-12)
+    sub = eval_coeffs_to_cube(np.array([0.0]), _sub_band(edges, 64), 3, 4, *out)[0, :, 0]
+    assert sub[:, :2].min() >= -1e-12 and sub[:, 2:].max() <= 1e-12
+
+
+def test_tent_anchors_at_freq_without_bounds():
+    """Unevenly spaced bands: the derived edges are not centred on freq, but the fit is."""
+    freq = np.array([1.0e9, 1.05e9, 1.2e9, 1.25e9, 1.5e9])
+    cube = np.zeros((1, 5, 1, 2, 3))
+    cube[0, :, 0, 1, 2] = (freq / 1.2e9) ** -0.7
+    out = fit_image_cube(np.array([0.0]), freq, cube, method="tent")
+    assert_allclose(eval_coeffs_to_cube(np.array([0.0]), freq, 3, 2, *out), cube, atol=1e-12)
+
+
+def test_histopolation_warns_that_nbasisf_is_ignored():
+    freq = np.linspace(1.0e9, 1.3e9, 4)
+    cube = np.ones((1, 4, 1, 2, 2))
+    with pytest.warns(UserWarning, match="nbasisf=2 is ignored"):
+        fit_image_cube(np.array([0.0]), freq, cube, nbasisf=2, method="tent")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fit_image_cube(np.array([0.0]), freq, cube, nbasisf=4, method="tent")
+
+
 def test_box_holds_each_band_value():
     edges = np.array([1.0e9, 1.1e9, 1.3e9, 1.4e9])
     cube = np.zeros((3, 2, 2))
@@ -283,14 +320,20 @@ def test_histopolation_needs_a_single_time():
 
 
 def test_tent_coefficients_can_be_remapped():
-    """The parametrisation is linear in its coefficients, so the coefficient shortcut applies."""
+    """Remapping the coefficients equals box-remapping the rendering, here onto a shifted grid."""
     freq = np.linspace(1.0e9, 1.3e9, 4)
     cube = np.zeros((1, 4, 1, 4, 6))
     cube[0, :, 0, 1, 2] = [1.0, 2.0, 2.5, 2.0]
-    coeffs, yi, xi, expr, params, *_ = fit_image_cube(np.array([0.0]), freq, cube, method="tent")
-    out, yo, xo = remap_coefficients(coeffs, yi, xi, expr, params, **_geometry(6, 4, 1e-5))
-    assert_allclose(out, coeffs)
-    assert list(yo) == list(yi) and list(xo) == list(xi)
+    cube[0, :, 0, 3, 4] = [0.5, 0.0, 1.0, 3.0]
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(np.array([0.0]), freq, cube, method="tent")
+    geom = _geometry(6, 4, 1e-5, nxo=5, nyo=5, x0o=0.37e-5, y0o=-0.6e-5)
+    out, yo, xo = remap_coefficients(coeffs, yi, xi, expr, params, **geom)
+    same = _geometry(5, 5, 1e-5, x0o=0.37e-5, y0o=-0.6e-5) | {"x0i": 0.37e-5, "y0i": -0.6e-5}
+    for fval in (1.02e9, 1.17e9, 1.31e9):
+        direct = eval_coeffs_to_slice(0.0, fval, coeffs, yi, xi, expr, params, texpr, fexpr, **geom)
+        via = eval_coeffs_to_slice(0.0, fval, out, yo, xo, expr, params, texpr, fexpr, **same)
+        assert_allclose(via, direct, atol=1e-12)
+    assert np.abs(direct).sum() > 0
 
 
 def test_poly_fit_with_a_single_band():

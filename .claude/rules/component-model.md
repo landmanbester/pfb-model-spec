@@ -49,14 +49,19 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
   `"fakenodes"` fits Chebyshev polynomials in `S(x) = -cos(pi (x - lo) / (hi - lo))` over the
   outer bin edges (the map lives in `texpr`/`fexpr`): stable, but with an O(1/nband) bias
   near the outer edges, where the map is flat.
-- **Histopolation** (`"box"`/`"tent"`) treats each band value as the band's *average*. The
-  `parametrisation` is a sympy `Piecewise` in `f`, linear in per-band means `m<b>` and (tent)
-  edge excursions `s<b>`, with the band edges baked in (`freq_bounds`, else midway between
-  centres), so the schema is unchanged and `remap_coefficients` applies. Tent slopes are
-  minmod-limited inside and sign-clipped at the outer edges: band averages are exact, the error
-  is O(1/nband²), and the sign of the data is kept (non-negative in, non-negative out). Needs
-  `ntime == 1`; ignores `nbasis*`/`sigmasq`; drops bands with zero weight in every plane; holds
-  the end values beyond the outer edges and splits gaps at their midpoint.
+- **Histopolation** (`"box"`/`"tent"`) treats each band value as the band's *weighted* average
+  and `freq` as its weighted frequency (pfb-imaging's D28 `freq_out`, not the edge midpoint).
+  The `parametrisation` is a sympy `Piecewise` in `f`, linear in per-band values `m<b>` and
+  (tent) slopes `s<b>` (value per half band width), each piece anchored at its band's `freq`,
+  with the band edges baked in (`freq_bounds`, else midway between centres), so the schema is
+  unchanged and `remap_coefficients` applies. Tent slopes are minmod-limited between
+  neighbouring anchors and sign-clipped at the outer edges: rendering at `freq` returns the
+  band value exactly (for a linear piece, the weighted average under the weights that define
+  `freq`), the error is O(1/nband²), and the sign of the data is kept (non-negative in,
+  non-negative out). Needs `ntime == 1` and each `freq` inside its band; ignores
+  `nbasist`/`sigmasq`, and `nbasisf` with a warning when it is not `nband`; drops bands with
+  zero weight in every plane; holds the end values beyond the outer edges and splits gaps at
+  their midpoint.
 - `eval_coeffs_to_cube(time, freq, nx, ny, coeffs, y_index, x_index, expr, paramf, texpr, fexpr)`
   → render coefficients to a `(ntime, nfreq, nstokes, ny, nx)` cube.
 - `eval_coeffs_to_slice(time, freq, coeffs, y_index, x_index, expr, paramf, texpr, fexpr, *, nxi,

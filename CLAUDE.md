@@ -37,7 +37,7 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
   is a box-only shortcut for parametrisations linear in their coefficients; the image-space path must
   always remain available. See `.claude/rules/component-model.md` → "The remap API".
 - **Frequency fit methods** (#29): `fit_image_cube` offers polynomial bases plus `"fakenodes"`
-  and the band-average-preserving `"box"`/`"tent"`; `model_to_ds` defaults to `"tent"`. See
+  and the band-value-preserving histopolations `"box"`/`"tent"`; `model_to_ds` defaults to `"tent"`. See
   `.claude/rules/component-model.md` → "The library API".
 - **Spec versioning + `pfbspec convert`** (`utils/spec.py`, `core/convert.py`) — the current spec is
   `"0.1"` (Stokes axis, `(Y, X)` cubes); older `.mds` stores upgrade on read; a schema change needs a

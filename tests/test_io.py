@@ -113,7 +113,6 @@ def test_model_to_ds_rerenders_unfitted_bands(tmp_path):
         (0.0, 0.0),
         ["I"],
         "v",
-        nbasisf=2,
         sigmasq=0.0,
     )
     assert_allclose(out[:, 0, 5, 20], 1.0, atol=1e-10)

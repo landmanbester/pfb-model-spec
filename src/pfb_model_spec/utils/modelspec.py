@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 
 import numpy as np
@@ -87,59 +88,70 @@ def _band_edges(freq: np.ndarray, bounds: np.ndarray | None) -> tuple[np.ndarray
     return lo, hi
 
 
-def _tent_slopes(means: np.ndarray, centre: np.ndarray, half: np.ndarray) -> np.ndarray:
-    """Limited slopes, as the excursion from a band's mean to its edges (``(nband, ...)``).
+def _tent_slopes(means: np.ndarray, anchor: np.ndarray, half: np.ndarray, qlo: float, qhi: float) -> np.ndarray:
+    """Limited slopes, in band value per half band width (``(nband, ...)``).
 
-    Interior bands take the minmod of the neighbouring differences. The end bands take their
-    one-sided difference, clipped so that the outer edge keeps the sign of the band mean. Every
-    edge value then lies between zero and the neighbouring means, so non-negative band means
-    give a non-negative spectrum, and a band at a local extremum is flat.
+    Band ``b`` is ``means[b] + slope[b] * (f - anchor[b]) / half[b]``. Slopes come from the
+    differences between neighbouring anchors: interior bands take their minmod, the end bands
+    their one-sided difference, clipped so that the outer edge (``qlo``/``qhi`` half widths
+    from the anchor) keeps the sign of the band value. Since a band's edge never lies beyond
+    its neighbour's anchor, every edge value lies between zero and the neighbouring values, so
+    non-negative bands give a non-negative spectrum, and a band at a local extremum is flat.
     """
     slopes = np.zeros_like(means)
     if means.shape[0] == 1:
         return slopes
     shape = (-1,) + (1,) * (means.ndim - 1)
-    diff = np.diff(means, axis=0) / np.diff(centre).reshape(shape)  # per Hz, between centres
+    diff = np.diff(means, axis=0) / np.diff(anchor).reshape(shape)  # per Hz, between anchors
     fwd, bwd = diff[1:], diff[:-1]
     slopes[1:-1] = np.where(fwd * bwd > 0, np.sign(fwd) * np.minimum(np.abs(fwd), np.abs(bwd)), 0.0)
     slopes[0], slopes[-1] = diff[0], diff[-1]
     slopes *= half.reshape(shape)
-    # outer edges: the low edge of the first band is m - s, the high edge of the last m + s;
-    # a zero mean has no sign to keep, so its band is flat
+    # outer edges: the low edge of the first band is m + s*qlo (qlo <= 0), the high edge of the
+    # last m + s*qhi (qhi >= 0); a zero mean has no sign to keep, so its band is flat
     m0, m1 = means[0], means[-1]
-    slopes[0] = np.where(m0 > 0, np.minimum(slopes[0], m0), np.where(m0 < 0, np.maximum(slopes[0], m0), 0.0))
-    slopes[-1] = np.where(m1 > 0, np.maximum(slopes[-1], -m1), np.where(m1 < 0, np.minimum(slopes[-1], -m1), 0.0))
+    if qlo < 0:
+        cap = m0 / -qlo
+        slopes[0] = np.where(m0 > 0, np.minimum(slopes[0], cap), np.where(m0 < 0, np.maximum(slopes[0], cap), 0.0))
+    if qhi > 0:
+        cap = -m1 / qhi
+        slopes[-1] = np.where(m1 > 0, np.maximum(slopes[-1], cap), np.where(m1 < 0, np.minimum(slopes[-1], cap), 0.0))
     return slopes
 
 
 def _fit_histopolation(freq, image, wgt, freq_bounds, method):
-    """Fit ``(nband, nstokes, ny, nx)`` band averages piecewise over frequency (see ``fit_image_cube``)."""
+    """Fit ``(nband, nstokes, ny, nx)`` band values piecewise over frequency (see ``fit_image_cube``)."""
     f = sm.Symbol("f")
     lo, hi = _band_edges(freq, freq_bounds)
     keep = np.any(wgt != 0, axis=1)
     if not keep.any():
         raise ValueError("every band has zero weight")
-    lo, hi, image = lo[keep], hi[keep], image[keep]
+    lo, hi, anchor, image = lo[keep], hi[keep], np.asarray(freq, dtype=float)[keep], image[keep]
+    if np.any(anchor < lo) or np.any(anchor > hi):
+        raise ValueError("each band's freq must lie within its bounds")
     nb, nstokes = image.shape[:2]
 
     y_index, x_index = np.where(np.any(image, axis=(0, 1)))
     means = image[:, :, y_index, x_index]  # (nb, nstokes, ncomps)
     mparams = sm.symbols(f"m(0:{nb})")
     if nb == 1:
-        # no width to vary over: the band mean is the model
+        # a single band carries no slope information: its value is the model
         return means.transpose(1, 0, 2), y_index, x_index, str(mparams[0]), [str(mparams[0])], "t", "f"
 
-    centre, half = (lo + hi) / 2, (hi - lo) / 2
+    # each piece is anchored at the band's own freq (its weighted frequency in pfb-imaging),
+    # not the edge midpoint, so rendering at freq returns the band value exactly
+    half = (hi - lo) / 2
+    qlo, qhi = (lo - anchor) / half, (hi - anchor) / half
     terms = list(mparams)
     coeffs = [means]
     params = list(mparams)
     if method == "tent":
         sparams = sm.symbols(f"s(0:{nb})")
         for b, sp in enumerate(sparams):
-            # q runs over [-1, 1] across the band and is held at its edge values outside it
-            q = sm.Min(sm.Max((f - float(centre[b])) / float(half[b]), -1), 1)
+            # q runs over [qlo, qhi] across the band and is held at its edge values outside it
+            q = sm.Min(sm.Max((f - float(anchor[b])) / float(half[b]), float(qlo[b])), float(qhi[b]))
             terms[b] = terms[b] + sp * q
-        coeffs.append(_tent_slopes(means, centre, half))
+        coeffs.append(_tent_slopes(means, anchor, half, qlo[0], qhi[-1]))
         params += list(sparams)
     # each band owns its own range; a gap between bands is split at its midpoint
     breaks = (hi[:-1] + lo[1:]) / 2
@@ -181,12 +193,15 @@ def fit_image_cube(
             a histopolation, ``"box"`` or ``"tent"``. The polynomial bases ring between band
             centres (Runge's phenomenon) when ``nbasisf`` is close to ``nband``; fake nodes
             does not, at the cost of an O(1/nband) bias near the outer band edges.
-            Histopolation treats each band value as the band's average: ``"box"`` holds it
-            across the band, ``"tent"`` adds a limited slope (see :func:`_tent_slopes`).
-            Both reproduce every band average exactly and keep non-negative bands
-            non-negative. They need ``ntime == 1``, ignore ``nbasist``/``nbasisf``/
-            ``sigmasq``, drop bands with zero weight in every Stokes plane, and hold the end
-            values beyond the outer edges.
+            Histopolation treats each band value as the band's weighted average, with
+            ``freq`` its weighted frequency: ``"box"`` holds it across the band, ``"tent"``
+            adds a limited slope through ``(freq, value)`` (see :func:`_tent_slopes`), so its
+            average over the band under the weights that define ``freq`` is the band value.
+            Both render every band value exactly at ``freq`` and keep non-negative bands
+            non-negative. They need ``ntime == 1`` and each ``freq`` inside its band, ignore
+            ``nbasist``/``sigmasq`` and ``nbasisf`` (warning if it differs from ``nband``),
+            drop bands with zero weight in every Stokes plane, and hold the end values beyond
+            the outer edges.
         sigmasq: Ridge term added to the Hessian; ignored when ``ntime == nband == 1``
             (nothing to fit: the data are the coefficients, whatever the weights).
         time_bounds: Optional ``(ntime, 2)`` ``[lo, hi]`` per time bin; ``"fakenodes"`` only.
@@ -202,7 +217,8 @@ def fit_image_cube(
         - ``texpr``/``fexpr`` map raw time/frequency onto the fit domain.
 
     Raises:
-        ValueError: On inconsistent shapes or basis sizes.
+        ValueError: On inconsistent shapes or basis sizes, or (histopolation) a ``freq``
+            outside its band.
         NotImplementedError: For an unknown ``method``, or histopolation with ``ntime > 1``.
     """
     from sympy.abc import f, t
@@ -216,6 +232,11 @@ def fit_image_cube(
         wgt = np.ones((ntime, nband, nstokes), dtype=float)
     elif wgt.shape != (ntime, nband, nstokes):
         raise ValueError(f"wgt must have shape {(ntime, nband, nstokes)}, got {wgt.shape}")
+    if method in HISTOPOLATION and nbasisf is not None and nbasisf != nband:
+        warnings.warn(
+            f"method {method!r} has one piece per band: nbasisf={nbasisf} is ignored for {nband} bands",
+            stacklevel=2,
+        )
     nbasist = ntime if nbasist is None else nbasist
     nbasisf = nband if nbasisf is None else nbasisf
     if not 1 <= nbasist <= ntime or not 1 <= nbasisf <= nband:

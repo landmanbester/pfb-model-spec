@@ -197,8 +197,8 @@ def model_to_ds(
         nbasisf: Number of frequency basis functions; defaults to `fit_image_cube`'s
             own default (number of fitted bands) when `None`.
         method: Fit method, forwarded to `fit_image_cube`. The default, ``"tent"``,
-            reproduces every band average, never rings and keeps a non-negative model
-            non-negative, so the model can be rendered at any frequency in the band.
+            renders every fitted band value exactly at its `freq`, never rings and keeps a
+            non-negative model non-negative, so it can be rendered anywhere in the band.
         sigmasq: Regularisation, forwarded to `fit_image_cube`.
         freq_bounds: Optional ``(nband, 2)`` band edges in Hz, forwarded to `build_mds_dataset`;
             ``freq_bounds[fsel]`` also gives the band edges to the fit.
