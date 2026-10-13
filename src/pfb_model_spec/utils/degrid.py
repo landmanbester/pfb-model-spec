@@ -371,7 +371,7 @@ def interp_mueller(
         m: ``(ny,)`` target m, any order.
 
     Returns:
-        ``(..., ny, nx)``, same dtype kind as ``mueller``.
+        ``(..., ny, nx)``, same dtype as ``mueller``.
 
     Raises:
         ValueError: If an axis is not strictly ascending, has fewer than two
@@ -384,8 +384,11 @@ def interp_mueller(
         raise ValueError(f"mueller grid {mueller.shape[-2:]} does not match (m, l) axes {(m_axis.size, l_axis.size)}")
     kl, wl, inl = _linear_weights(l_axis, l)
     km, wm, inm = _linear_weights(m_axis, m)
-    along_l = mueller[..., kl] * (1.0 - wl) + mueller[..., kl + 1] * wl  # (..., nm, nx)
-    out = along_l[..., km, :] * (1.0 - wm)[:, None] + along_l[..., km + 1, :] * wm[:, None]
+    # weights in the block's real dtype so float32/complex64 blocks are not promoted
+    rdt = np.finfo(mueller.dtype).dtype
+    wl, wm = wl.astype(rdt), wm.astype(rdt)
+    along_l = mueller[..., kl] * (1 - wl) + mueller[..., kl + 1] * wl  # (..., nm, nx)
+    out = along_l[..., km, :] * (1 - wm)[:, None] + along_l[..., km + 1, :] * wm[:, None]
     return out * (inm[:, None] & inl[None, :])
 
 

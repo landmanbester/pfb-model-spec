@@ -688,6 +688,23 @@ def test_interp_mueller_is_exact_on_a_bilinear_field():
     assert_allclose(out[1, 0], 1j * expected, rtol=1e-12)
 
 
+def test_interp_mueller_keeps_the_blocks_precision():
+    from pfb_model_spec.utils.degrid import interp_mueller
+
+    la = np.linspace(-0.02, 0.02, 9)
+    ma = np.linspace(-0.01, 0.015, 7)
+    rng = np.random.default_rng(0)
+    block = rng.standard_normal((2, 7, 9)) + 1j * rng.standard_normal((2, 7, 9))
+    l = np.array([0.0103, -0.0199, 0.004])  # noqa: E741 -- arbitrary order
+    m = np.array([0.0, 0.0149, -0.0099, 0.007])
+    ref = interp_mueller(block, la, ma, l, m)
+    out32 = interp_mueller(block.real.astype(np.float32), la, ma, l, m)
+    outc64 = interp_mueller(block.astype(np.complex64), la, ma, l, m)
+    assert out32.dtype == np.float32 and outc64.dtype == np.complex64
+    assert_allclose(out32, interp_mueller(block.real, la, ma, l, m), rtol=1e-6, atol=1e-6)
+    assert_allclose(outc64, ref, rtol=1e-6, atol=1e-6)
+
+
 def test_interp_mueller_is_zero_outside_its_axes():
     from pfb_model_spec.utils.degrid import interp_mueller
 
