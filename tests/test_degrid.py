@@ -653,6 +653,8 @@ def test_crop_bbox_of_an_empty_mask_is_degenerate():
 
     rm = crop_bbox(np.zeros((16, 8)))
     assert rm.mask.shape == (2, 2)
+    assert (rm.i0, rm.j0) == (0, 0)
+    assert not rm.mask.any()
 
 
 def test_crop_bbox_grows_odd_extents_to_even():
