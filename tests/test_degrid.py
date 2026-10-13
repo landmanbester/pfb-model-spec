@@ -579,3 +579,87 @@ def test_pixel_lm_matches_the_visibility_phase(flip_u, flip_v):
     lc, mc = pixel_lm(geom, i0=4, j0=30, shape=(12, 16))
     assert_allclose(lc, lax[30:46])
     assert_allclose(mc, max_[4:16])
+
+
+@pytest.mark.parametrize("flip_u", [False, True])
+@pytest.mark.parametrize("flip_v", [False, True])
+def test_crop_phase_centre_reproduces_the_full_grid_degrid(flip_u, flip_v):
+    """Degridding a cropped sub-grid must equal degridding the full one.
+
+    This is the guard on `crop_phase_centre`'s arithmetic, and it has to run
+    over every flip combination: each axis's offset sign is set by its flip
+    convention, and a sign error moves the model on the sky rather than
+    changing it slightly, so it would sail past any loose tolerance. The
+    check is that a wrong sign is order-unity wrong, not that the right one
+    is merely close.
+    """
+    from ducc0.wgridder import dirty2vis
+
+    from pfb_model_spec.utils.degrid import crop_bbox, crop_phase_centre
+
+    rng = np.random.default_rng(42)
+    nx, ny, cell = 64, 48, 1e-5
+    x0, y0 = -3e-4, 2e-4
+
+    uvw = rng.normal(0.0, 3000.0, (500, 3))
+    uvw[:, 2] *= 0.05
+    freq = np.linspace(1.0e9, 1.1e9, 4)
+
+    # flux confined to a box away from the grid centre, so a mis-set centre
+    # cannot be masked by symmetry. (Y, X) like the .mds; ducc is x-major, so
+    # it is handed the transpose
+    image = np.zeros((ny, nx))
+    image[30:42, 10:26] = rng.normal(size=(12, 16))
+
+    kw = dict(
+        uvw=uvw,
+        freq=freq,
+        pixsize_x=cell,
+        pixsize_y=cell,
+        flip_u=flip_u,
+        flip_v=flip_v,
+        flip_w=False,
+        epsilon=1e-9,
+        do_wgridding=True,
+        divide_by_n=False,
+        nthreads=1,
+    )
+    ref = dirty2vis(dirty=np.ascontiguousarray(image.T), center_x=x0, center_y=y0, **kw)
+
+    rm = crop_bbox(np.where(image != 0.0, 1.0, 0.0))
+    assert (rm.mask.shape, rm.i0, rm.j0) == ((12, 16), 30, 10)
+    nyc, nxc = rm.mask.shape
+    sub = np.ascontiguousarray(image[rm.i0 : rm.i0 + nyc, rm.j0 : rm.j0 + nxc].T)
+
+    geom = dict(x0=x0, y0=y0, cell_rad=cell, flip_u=flip_u, flip_v=flip_v, nx=nx, ny=ny)
+    xc, yc = crop_phase_centre(rm=rm, **geom)
+    got = dirty2vis(dirty=sub, center_x=xc, center_y=yc, **kw)
+    np.testing.assert_allclose(got, ref, rtol=0, atol=1e-6 * np.abs(ref).max())
+
+    # every other sign choice is order-unity wrong
+    for sx, sy in ((1, -1), (-1, 1), (-1, -1)):
+        bad = dirty2vis(
+            dirty=sub,
+            center_x=x0 + sx * (xc - x0),
+            center_y=y0 + sy * (yc - y0),
+            **kw,
+        )
+        assert np.abs(bad - ref).max() > 0.1 * np.abs(ref).max()
+
+
+def test_crop_bbox_of_an_empty_mask_is_degenerate():
+    """An empty region must not crop to a zero-sized grid ducc would reject."""
+    from pfb_model_spec.utils.degrid import crop_bbox
+
+    rm = crop_bbox(np.zeros((16, 8)))
+    assert rm.mask.shape == (2, 2)
+
+
+def test_crop_bbox_grows_odd_extents_to_even():
+    from pfb_model_spec.utils.degrid import crop_bbox
+
+    mask = np.zeros((10, 12))
+    mask[3:6, 4:9] = 1.0  # 3 x 5, both odd
+    rm = crop_bbox(mask)
+    assert rm.mask.shape == (4, 6)
+    assert (rm.i0, rm.j0) == (3, 4)

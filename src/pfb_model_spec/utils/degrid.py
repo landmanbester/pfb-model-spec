@@ -12,7 +12,7 @@ of the fused wrapper never transposes at all.
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import xarray as xr
@@ -231,6 +231,113 @@ def pixel_lm(
     ll = -geom["x0"] + sl * (j - nx // 2) * cell
     mm = -geom["y0"] + sm * (i - ny // 2) * cell
     return ll, mm
+
+
+class RegionMask(NamedTuple):
+    """A region's weights, cropped to the region's bounding box.
+
+    Cropping is a pure optimisation, and a large one: a region is degridded by
+    its own `dirty2vis` call, whose cost scales with the grid it is handed, not
+    with the flux on it. Measured in pfb-imaging#331 on a 6720^2 model with three
+    regions, the per-chunk gridder time fell from 3 x 5.29 s to 5.29 + 0.64 + 0.51 s. It
+    also shrinks what the driver ships to each replica -- a full-grid float64
+    mask is 361 MB at 6720^2, and a small region's is under 1 MB.
+
+    Attributes:
+        mask: `(nyc, nxc)` float64 weights, (Y, X) like the model.
+        i0: Index along y of the mask's origin in the full model grid.
+        j0: Index along x of the mask's origin in the full model grid.
+    """
+
+    mask: np.ndarray
+    i0: int
+    j0: int
+
+
+def _even_span(lo: int, hi: int, n: int) -> tuple[int, int]:
+    """Grow `[lo, hi)` to an even length without leaving `[0, n)`.
+
+    ducc's wgridder asserts `nx_dirty must be even`, so a bounding box of odd
+    extent cannot be handed to it. Growing outwards keeps the box a window on
+    real model pixels, which padding with zeros would not.
+    """
+    if (hi - lo) % 2 == 0:
+        return lo, hi
+    if hi < n:
+        return lo, hi + 1
+    if lo > 0:
+        return lo - 1, hi
+    # the full axis is odd, so no even window exists; the uncropped grid would
+    # fail the same assertion, and that is the error worth surfacing
+    return lo, hi
+
+
+def crop_bbox(mask: np.ndarray) -> RegionMask:
+    """Crop a full-grid mask to the bounding box of its non-zero pixels.
+
+    The box is grown by at most one pixel per axis so that both extents are
+    even, which ducc requires (see `_even_span`).
+
+    Args:
+        mask: `(ny, nx)` weights, (Y, X) like the model.
+
+    Returns:
+        The cropped mask and its origin. An all-zero mask crops to a `(2, 2)`
+        zero box at the origin -- `degrid_stokes` skips an empty plane
+        outright, so the degenerate box is never gridded.
+    """
+    ny, nx = mask.shape
+    ys = np.flatnonzero(mask.any(axis=1))
+    xs = np.flatnonzero(mask.any(axis=0))
+    if xs.size == 0 or ys.size == 0:
+        return RegionMask(np.zeros((min(2, ny), min(2, nx)), dtype=mask.dtype), 0, 0)
+    i0, i1 = _even_span(int(ys[0]), int(ys[-1]) + 1, ny)
+    j0, j1 = _even_span(int(xs[0]), int(xs[-1]) + 1, nx)
+    return RegionMask(np.ascontiguousarray(mask[i0:i1, j0:j1]), i0, j0)
+
+
+def crop_phase_centre(
+    *,
+    x0: float,
+    y0: float,
+    cell_rad: float,
+    flip_u: bool,
+    flip_v: bool,
+    nx: int,
+    ny: int,
+    rm: RegionMask,
+) -> tuple[float, float]:
+    """The `center_x`/`center_y` a cropped sub-grid must be degridded with.
+
+    ducc places image pixel `i` at `(i - nx // 2) * cell` from the image
+    centre, so cropping moves the centre by the shift in that origin --
+    `j0 + nxc // 2 - nx // 2` pixels along x and `i0 + nyc // 2 - ny // 2`
+    along y. The sign is the axis's flip convention: `flip_u`/`flip_v` negate
+    the direction the offset is measured in. Getting either sign wrong is not
+    a small error -- it puts the model in the wrong place on the sky, and the
+    visibilities come back order-unity wrong (`test_crop_phase_centre_reproduces_the_full_grid_degrid`
+    checks all four flip combinations).
+
+    Args:
+        x0: The model's own `center_x`, from `model_geometry`.
+        y0: The model's own `center_y`.
+        cell_rad: Pixel size in radians (square pixels).
+        flip_u: The model's U-axis flip convention.
+        flip_v: The model's V-axis flip convention.
+        nx: Full model grid size along x.
+        ny: Full model grid size along y.
+        rm: The cropped mask whose grid the offsets are wanted for.
+
+    Returns:
+        `(center_x, center_y)` for `degrid_stokes`.
+    """
+    nyc, nxc = rm.mask.shape
+    sx = -1.0 if flip_u else 1.0
+    sy = -1.0 if flip_v else 1.0
+    return (
+        x0 + sx * (rm.j0 + nxc // 2 - nx // 2) * cell_rad,
+        y0 + sy * (rm.i0 + nyc // 2 - ny // 2) * cell_rad,
+    )
 
 
 def model_sampling(model_ds: xr.Dataset) -> dict[str, Any]:
