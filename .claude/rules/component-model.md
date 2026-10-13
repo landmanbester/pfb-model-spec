@@ -124,7 +124,8 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   `XX == YY == I`, `XY == YX == 0`. The coefficients match
   `africanus.model.coherency.convert` (verified elementwise) but are hard-coded, because
   tests here must not depend on africanus.
-- `model_to_apparent_vis_for_region(…)` — the fused per-chunk wrapper over the above.
+- `model_to_apparent_vis_for_region(…)` — the fused per-chunk wrapper over the above; a
+  complex `mueller` is degridded as Re + i·Im.
 - `pixel_lm(geom, *, i0, j0, shape)` → `(l, m)` axes of the model grid or a crop of it. The
   convention is the wgridder's `V = Σ I exp(+2πi(ul + vm + w(n-1))ν/c)`, `l` East and `m` North,
   measured against ducc0 for all four `(flip_u, flip_v)`. Evaluate a beam on these, or an
@@ -140,7 +141,9 @@ distribution and the MS write belong to the calling application (pfb-imaging's
 - `model_to_apparent_vis_for_regions(…, region_masks, beam_terms, stokes_out, divide_by_n=False)`
   → one `(nrow, nchan, ncorr)` array per region. Renders the model once, crops each region to
   its bounding box with a shifted phase centre, and applies each `BeamTerm` on its rows. A
-  complex beam is degridded as Re + i·Im. Rows covered by no term predict zero. **`divide_by_n`
+  complex beam is degridded as Re + i·Im, one output plane at a time. Rows covered by no term
+  predict zero; an empty `beam_terms` is refused. Each term is a full gridding pass per plane, so
+  K row groups cost about K× the FFT work. **`divide_by_n`
   defaults to `False` and passes straight through: a caller with a bare beam must pass `True`**
   so ducc folds in `1/n`; only a beam that already contains `1/n` keeps `False`.
 

@@ -863,3 +863,104 @@ def test_regions_refuse_a_mueller_of_the_wrong_shape():
             stokes_out="IQ",
             beam_terms=[BeamTerm(block, la, ma)],
         )
+
+
+def test_regions_that_partition_the_grid_add_up_to_the_whole():
+    """Two cropped regions must sum to the uncropped prediction, beam or not."""
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    nsi = len(geom["stokes"])
+    rng = np.random.default_rng(38)
+    uvw, chan = _uvw_freq(rng, nrow=300, nchan=2)
+    left = np.zeros((geom["ny"], geom["nx"]))
+    left[:, : geom["nx"] // 2] = 1.0
+    regions = [crop_bbox(left), crop_bbox(1.0 - left)]
+    block, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
+    kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], epsilon=1e-10)
+    for terms in (None, [BeamTerm(block, la, ma)]):
+        parts = model_to_apparent_vis_for_regions(ds, region_masks=regions, beam_terms=terms, **kw)
+        (whole,) = model_to_apparent_vis_for_regions(ds, beam_terms=terms, **kw)
+        assert len(parts) == 2 and all(np.abs(p).max() > 1e-3 * np.abs(whole).max() for p in parts)
+        assert_allclose(parts[0] + parts[1], whole, rtol=0, atol=1e-8 * np.abs(whole).max())
+
+
+def test_regions_conj_rows_give_the_hermitian_of_the_reversed_baseline():
+    """With Q/U/V in the apparent sky, a reversed baseline must predict V_qp = V_pq^H.
+
+    That is XX and YY conjugated, and XY swapped with conj(YX). Conjugating the
+    Stokes-basis Mueller gives this only because XY = U + iV and YX = U - iV, so
+    it is checked here on all four correlations, not on XX alone.
+    """
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    rng = np.random.default_rng(39)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
+    block, la, ma = _sloped_block(geom, nso=4, nsi=1, scale=1.0 + 0.3j)
+    block[1, 0] = 0.2 * block[0, 0]
+    block[2, 0] = (0.1 - 0.05j) * block[0, 0]
+    block[3, 0] = 0.07j * block[0, 0]
+    every = np.ones(uvw.shape[0], dtype=bool)
+    kw = dict(freq=chan, corr_types=("XX", "XY", "YX", "YY"), time=time[0], freq_out=freq[0], stokes_out="IQUV")
+    (fwd,) = model_to_apparent_vis_for_regions(ds, uvw=uvw, beam_terms=[BeamTerm(block, la, ma)], **kw)
+    (rev,) = model_to_apparent_vis_for_regions(
+        ds, uvw=-uvw, beam_terms=[BeamTerm(block, la, ma, rows=every, conj_rows=every)], **kw
+    )
+    assert np.abs(fwd[..., 1] - fwd[..., 2]).max() > 1e-3 * np.abs(fwd).max()  # XY and YX differ
+    assert_allclose(rev, np.conj(fwd[..., [0, 2, 1, 3]]), rtol=0, atol=1e-7 * np.abs(fwd).max())
+
+
+def test_regions_beam_rows_respect_the_padding_mask():
+    """A term's rows and the structural mask combine: zero wherever either is zero."""
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    nsi = len(geom["stokes"])
+    rng = np.random.default_rng(40)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=3)
+    block, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
+    even = np.arange(uvw.shape[0]) % 2 == 0
+    mask = (rng.random((uvw.shape[0], chan.size)) > 0.3).astype(np.uint8)
+    kw = dict(uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], epsilon=1e-10)
+    (got,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma, rows=even)], mask=mask, **kw)
+    (ref,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
+    keep = (mask.astype(bool) & even[:, None])[..., None]
+    assert not got[~keep[..., 0]].any()  # exactly zero, not merely small
+    assert_allclose(got, np.where(keep, ref, 0.0), rtol=0, atol=1e-8 * np.abs(ref).max())
+
+
+def test_regions_an_empty_region_predicts_zeros():
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    rng = np.random.default_rng(41)
+    uvw, chan = _uvw_freq(rng, nrow=50, nchan=2)
+    empty = crop_bbox(np.zeros((geom["ny"], geom["nx"])))
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], region_masks=[empty]
+    )
+    assert got.shape == (50, 2, 1) and not got.any()
+
+
+def test_regions_refuse_an_empty_list_of_beam_terms():
+    ds, _, time, freq, cell = _synthetic_mds()
+    rng = np.random.default_rng(42)
+    uvw, chan = _uvw_freq(rng, nrow=10, nchan=1)
+    with pytest.raises(ValueError, match="empty"):
+        model_to_apparent_vis_for_regions(
+            ds, uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], beam_terms=[]
+        )
+
+
+def test_singular_wrapper_takes_a_complex_mueller():
+    """The singular wrapper degrids a complex block as Re + i·Im, matching the regions path."""
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    rng = np.random.default_rng(43)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
+    block, la, ma = _sloped_block(geom, nso=4, nsi=1, scale=1.0 + 0.3j)
+    block[3, 0] = 0.07j * block[0, 0]
+    kw = dict(
+        uvw=uvw, freq=chan, corr_types=("XX", "XY", "YX", "YY"), time=time[0], freq_out=freq[0], stokes_out="IQUV"
+    )
+    full = interp_mueller(block, la, ma, *pixel_lm(geom))
+    got = model_to_apparent_vis_for_region(ds, mueller=full, **kw)
+    (ref,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
+    assert_allclose(got, ref, rtol=0, atol=1e-10 * np.abs(ref).max())
