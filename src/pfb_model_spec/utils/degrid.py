@@ -509,7 +509,7 @@ def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
 
     Args:
         stokes_image: Intrinsic model, shape ``(nstokes_in, ny, nx)``.
-        mueller: Real Mueller block, shape ``(nstokes_out, nstokes_in, ny, nx)``
+        mueller: Real or complex Mueller block, shape ``(nstokes_out, nstokes_in, ny, nx)``
             on the same grid as ``stokes_image``.
 
     Returns:
@@ -641,3 +641,178 @@ def model_to_apparent_vis_for_region(
         mask=mask,
     )
     return stokes_vis_to_corr(stokes_vis, stokes_in, corr_types)
+
+
+class BeamTerm(NamedTuple):
+    """One primary beam and the visibility rows it applies to.
+
+    The caller builds the beam (pfb-model-spec never depends on a beam package):
+    a Stokes-basis Mueller block on a coarse, ascending (m, l) grid in the
+    :func:`pixel_lm` convention, interpolated onto each region here. Several
+    terms partition the rows between beams -- a mixed array's baseline groups --
+    and ``conj_rows`` marks rows whose baseline ordering is reversed relative to
+    the beam's, which take ``conj(mueller)`` (meerkat-beams' MeerKAT/MeerKAT+
+    cross group). A complex block is predicted exactly, by degridding its real
+    and imaginary parts separately.
+
+    Attributes:
+        mueller: ``(nso, nsi, nmb, nlb)``, real or complex, bare primary beam.
+        l_axis: ``(nlb,)`` ascending, radians.
+        m_axis: ``(nmb,)`` ascending, radians.
+        rows: ``(nrow,)`` bool, the rows this term predicts; ``None`` means all.
+        conj_rows: ``(nrow,)`` bool, a subset of ``rows`` taking the conjugate.
+    """
+
+    mueller: np.ndarray
+    l_axis: np.ndarray
+    m_axis: np.ndarray
+    rows: np.ndarray | None = None
+    conj_rows: np.ndarray | None = None
+
+
+def _check_beam_terms(terms: Sequence[BeamTerm], nrow: int, nso: int, nsi: int) -> None:
+    """Refuse beam terms that would mislabel planes or double-count rows."""
+    covered = np.zeros(nrow, dtype=bool)
+    for term in terms:
+        if term.mueller.ndim != 4 or term.mueller.shape[:2] != (nso, nsi):
+            raise ValueError(f"mueller must be (nso={nso}, nsi={nsi}, nm, nl), got {term.mueller.shape}")
+        rows = np.ones(nrow, dtype=bool) if term.rows is None else np.asarray(term.rows, dtype=bool)
+        if rows.shape != (nrow,):
+            raise ValueError(f"rows must have shape ({nrow},), got {rows.shape}")
+        if (covered & rows).any():
+            raise ValueError("beam terms' rows must be disjoint")
+        covered |= rows
+        if term.conj_rows is not None:
+            conj = np.asarray(term.conj_rows, dtype=bool)
+            if conj.shape != (nrow,) or (conj & ~rows).any():
+                raise ValueError("conj_rows must be a subset of the term's rows")
+
+
+def _degrid_beam_term(uvw, freq, sub, term, l, m, mask, kw) -> np.ndarray:  # noqa: E741
+    """Attenuate one region by one beam term and degrid it onto the term's rows."""
+    nrow = uvw.shape[0]
+    nso, nsi = term.mueller.shape[:2]
+    dtype = np.result_type(sub.dtype, term.mueller.dtype)
+    apparent = np.zeros((nso,) + sub.shape[1:], dtype=dtype)
+    # entry by entry: a full-resolution (nso, nsi, ny, nx) block would be
+    # 2.9 GB at 6720^2 for a 4x4 beam
+    for o in range(nso):
+        for i in range(nsi):
+            apparent[o] += interp_mueller(term.mueller[o, i], term.l_axis, term.m_axis, l, m) * sub[i]
+    term_mask = mask
+    if term.rows is not None:
+        rows = np.asarray(term.rows, dtype=np.uint8)[:, None]
+        term_mask = np.ascontiguousarray(np.broadcast_to(rows, (nrow, freq.size)) if mask is None else mask * rows)
+    vis = degrid_stokes(uvw, freq, np.ascontiguousarray(apparent.real), mask=term_mask, **kw)
+    if np.iscomplexobj(apparent):
+        vis_im = degrid_stokes(uvw, freq, np.ascontiguousarray(apparent.imag), mask=term_mask, **kw)
+        sign = np.ones(nrow) if term.conj_rows is None else np.where(term.conj_rows, -1.0, 1.0)
+        vis = vis + 1j * sign[None, :, None] * vis_im
+    return vis
+
+
+def model_to_apparent_vis_for_regions(
+    model_ds: xr.Dataset,
+    *,
+    uvw: np.ndarray,
+    freq: np.ndarray,
+    corr_types: Sequence[str],
+    time: float,
+    freq_out: float,
+    region_masks: Sequence[RegionMask] | None = None,
+    stokes_out: str | Sequence[str] | None = None,
+    beam_terms: Sequence[BeamTerm] | None = None,
+    mask: np.ndarray | None = None,
+    epsilon: float = 1e-7,
+    do_wgridding: bool = True,
+    divide_by_n: bool = False,
+    nthreads: int = 1,
+) -> list[np.ndarray]:
+    """Render a model once and degrid each region, optionally through beams.
+
+    The multi-region entry point (#27): the model is rendered once per chunk,
+    each region is degridded on its cropped bounding box with a shifted phase
+    centre, and each :class:`BeamTerm` attenuates the region on the rows it
+    owns. Rows covered by no term predict zero, so a caller that splits rows
+    between beams must cover all of them. ``divide_by_n`` passes straight
+    through; with a bare beam set it ``True`` and ducc folds in ``1/n``.
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+        uvw: ``(nrow, 3)`` metres; padded rows must be masked by ``mask``.
+        freq: ``(nchan,)`` Hz.
+        corr_types: Output correlations.
+        time: Representative chunk time, unweighted mean, model time units.
+        freq_out: Representative chunk frequency, unweighted mean, Hz.
+        region_masks: Cropped region masks; ``None`` means one full-grid region.
+        stokes_out: Stokes planes predicted. Without beams a subset of the
+            model's; with beams the Mueller output axis. Defaults to the
+            model's own planes.
+        beam_terms: Beams and the rows they own; ``None`` applies no beam.
+        mask: ``(nrow, nchan)`` uint8 structural mask (padding), never flags.
+        epsilon: Gridder accuracy.
+        do_wgridding: w-correction via improved w-stacking.
+        divide_by_n: Divide by the geometric n-term in ducc.
+        nthreads: Gridder threads.
+
+    Returns:
+        One ``(nrow, nchan, len(corr_types))`` complex array per region.
+
+    Raises:
+        ValueError: On a Stokes plane the model lacks, inconsistent beam terms,
+            or anything the composed primitives refuse.
+    """
+    model_ds = upgrade(model_ds)
+    geom = model_geometry(model_ds)
+    model_stokes = list(geom["stokes"])
+    stokes_out = list(stokes_out) if stokes_out is not None else model_stokes
+    if region_masks is None:
+        region_masks = [RegionMask(np.ones((geom["ny"], geom["nx"])), 0, 0)]
+    if beam_terms is not None:
+        _check_beam_terms(beam_terms, uvw.shape[0], len(stokes_out), len(model_stokes))
+
+    image = render_model_region(model_ds, time=time, freq_out=freq_out)
+    if beam_terms is None:
+        missing = [s for s in stokes_out if s not in model_stokes]
+        if missing:
+            raise ValueError(f"stokes_out {stokes_out} names {missing}, which the model {model_stokes} lacks")
+        planes = [model_stokes.index(s) for s in stokes_out]
+        if planes != list(range(len(model_stokes))):
+            # fancy indexing copies the whole grid, so only when not the identity
+            image = image[planes]
+
+    out = []
+    for rm in region_masks:
+        nyc, nxc = rm.mask.shape
+        sub = image[:, rm.i0 : rm.i0 + nyc, rm.j0 : rm.j0 + nxc] * rm.mask[None]
+        x0c, y0c = crop_phase_centre(
+            x0=geom["x0"],
+            y0=geom["y0"],
+            cell_rad=geom["cell_rad"],
+            flip_u=geom["flip_u"],
+            flip_v=geom["flip_v"],
+            nx=geom["nx"],
+            ny=geom["ny"],
+            rm=rm,
+        )
+        kw = dict(
+            cell_rad=geom["cell_rad"],
+            x0=x0c,
+            y0=y0c,
+            flip_u=geom["flip_u"],
+            flip_v=geom["flip_v"],
+            flip_w=geom["flip_w"],
+            epsilon=epsilon,
+            do_wgridding=do_wgridding,
+            divide_by_n=divide_by_n,
+            nthreads=nthreads,
+        )
+        if beam_terms is None:
+            stokes_vis = degrid_stokes(uvw, freq, np.ascontiguousarray(sub), mask=mask, **kw)
+        else:
+            l, m = pixel_lm(geom, i0=rm.i0, j0=rm.j0, shape=(nyc, nxc))  # noqa: E741
+            stokes_vis = np.zeros((len(stokes_out), uvw.shape[0], freq.size), dtype=np.complex128)
+            for term in beam_terms:
+                stokes_vis += _degrid_beam_term(uvw, freq, sub, term, l, m, mask, kw)
+        out.append(stokes_vis_to_corr(stokes_vis, stokes_out, corr_types))
+    return out

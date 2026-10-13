@@ -6,10 +6,15 @@ from ducc0.wgridder.experimental import dirty2vis
 from numpy.testing import assert_allclose
 
 from pfb_model_spec.utils.degrid import (
+    BeamTerm,
     apply_mueller,
+    crop_bbox,
     degrid_stokes,
+    interp_mueller,
     model_geometry,
     model_to_apparent_vis_for_region,
+    model_to_apparent_vis_for_regions,
+    pixel_lm,
     render_model_region,
     stokes_vis_to_corr,
 )
@@ -697,3 +702,147 @@ def test_interp_mueller_rejects_descending_axes():
 
     with pytest.raises(ValueError, match="ascending"):
         interp_mueller(np.ones((1, 1, 3, 3)), np.array([2.0, 1.0, 0.0]), np.arange(3.0), np.zeros(1), np.zeros(1))
+
+
+def _flat_axes(geom, n=5):
+    l, m = pixel_lm(geom)  # noqa: E741
+    pad = geom["cell_rad"]
+    return np.linspace(l.min() - pad, l.max() + pad, n), np.linspace(m.min() - pad, m.max() + pad, n)
+
+
+def _sloped_block(geom, nso=1, nsi=1, scale=1.0):
+    """A Mueller field with an E-W and N-S gradient, so a mirrored axis shows."""
+    la, ma = _flat_axes(geom)
+    field = 1.0 + 40.0 * la[None, :] - 25.0 * ma[:, None]
+    block = np.zeros((nso, nsi, ma.size, la.size), dtype=np.result_type(scale, float))
+    for k in range(min(nso, nsi)):
+        block[k, k] = scale * field
+    return block, la, ma
+
+
+def test_regions_without_beam_match_the_singular_wrapper():
+    ds, _, time, freq, cell = _synthetic_mds()
+    rng = np.random.default_rng(31)
+    uvw, chan = _uvw_freq(rng, nrow=300, nchan=3)
+    corr = ("XX", "XY", "YX", "YY")
+    (got,) = model_to_apparent_vis_for_regions(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
+    ref = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
+    assert_allclose(got, ref, rtol=0, atol=1e-12 * np.abs(ref).max())
+
+
+def test_regions_identity_beam_term_matches_no_beam():
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    rng = np.random.default_rng(32)
+    uvw, chan = _uvw_freq(rng, nrow=300, nchan=3)
+    la, ma = _flat_axes(geom)
+    nsi = len(geom["stokes"])
+    ident = np.zeros((nsi, nsi, ma.size, la.size))
+    for k in range(nsi):
+        ident[k, k] = 1.0
+    kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], divide_by_n=True)
+    (beam,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(ident, la, ma)], **kw)
+    (bare,) = model_to_apparent_vis_for_regions(ds, **kw)
+    assert_allclose(beam, bare, rtol=0, atol=1e-12 * np.abs(bare).max())
+
+
+def test_regions_beam_term_crop_matches_full_grid():
+    """A cropped region sees the beam at the same sky positions as the full grid."""
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    nsi = len(geom["stokes"])
+    rng = np.random.default_rng(33)
+    uvw, chan = _uvw_freq(rng, nrow=300, nchan=2)
+    block, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
+    full_mask = np.zeros((geom["ny"], geom["nx"]))
+    full_mask[:, : geom["nx"] // 2] = 1.0
+    kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], epsilon=1e-10)
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, region_masks=[crop_bbox(full_mask)], beam_terms=[BeamTerm(block, la, ma)], **kw
+    )
+    full_block = interp_mueller(block, la, ma, *pixel_lm(geom))
+    ref = model_to_apparent_vis_for_region(
+        ds, mueller=full_block, stokes_out=geom["stokes"], region_mask=full_mask, **kw
+    )
+    assert_allclose(got, ref, rtol=0, atol=1e-7 * np.abs(ref).max())
+
+
+def test_regions_conj_rows_predict_the_reversed_baseline():
+    """At -uvw, conj_rows must give exactly conj of the forward prediction (Stokes I, XX)."""
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    nsi = len(geom["stokes"])
+    rng = np.random.default_rng(34)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
+    block, la, ma = _sloped_block(geom, nso=1, nsi=nsi, scale=1.0 + 0.3j)
+    kw = dict(freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], stokes_out="I", epsilon=1e-10)
+    every = np.ones(uvw.shape[0], dtype=bool)
+    (fwd,) = model_to_apparent_vis_for_regions(ds, uvw=uvw, beam_terms=[BeamTerm(block, la, ma)], **kw)
+    (rev,) = model_to_apparent_vis_for_regions(
+        ds, uvw=-uvw, beam_terms=[BeamTerm(block, la, ma, rows=every, conj_rows=every)], **kw
+    )
+    assert np.abs(fwd.imag).max() > 1e-3 * np.abs(fwd).max()  # the imaginary beam part matters
+    assert_allclose(rev, np.conj(fwd), rtol=0, atol=1e-7 * np.abs(fwd).max())
+
+
+def test_regions_terms_over_a_row_split_add_up():
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    nsi = len(geom["stokes"])
+    rng = np.random.default_rng(35)
+    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
+    a, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
+    b = 0.5 * a
+    even = np.arange(uvw.shape[0]) % 2 == 0
+    kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0])
+    (both,) = model_to_apparent_vis_for_regions(
+        ds, beam_terms=[BeamTerm(a, la, ma, rows=even), BeamTerm(b, la, ma, rows=~even)], **kw
+    )
+    (only_a,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(a, la, ma, rows=even)], **kw)
+    (only_b,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(b, la, ma, rows=~even)], **kw)
+    assert_allclose(both, only_a + only_b, rtol=0, atol=1e-12 * np.abs(both).max())
+    assert not only_a[~even].any() and not only_b[even].any()
+
+
+@pytest.mark.parametrize(
+    "rows, conj_rows, match",
+    [
+        ("overlap", None, "disjoint"),
+        ("even", "odd", "subset"),
+    ],
+)
+def test_regions_refuse_inconsistent_beam_terms(rows, conj_rows, match):
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    nsi = len(geom["stokes"])
+    rng = np.random.default_rng(36)
+    uvw, chan = _uvw_freq(rng, nrow=10, nchan=1)
+    a, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
+    even = np.arange(10) % 2 == 0
+    if rows == "overlap":
+        terms = [BeamTerm(a, la, ma, rows=even), BeamTerm(a, la, ma, rows=np.ones(10, bool))]
+    else:
+        terms = [BeamTerm(a, la, ma, rows=even, conj_rows=~even)]
+    with pytest.raises(ValueError, match=match):
+        model_to_apparent_vis_for_regions(
+            ds, uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], beam_terms=terms
+        )
+
+
+def test_regions_refuse_a_mueller_of_the_wrong_shape():
+    ds, _, time, freq, cell = _synthetic_mds()
+    geom = model_geometry(ds)
+    rng = np.random.default_rng(37)
+    uvw, chan = _uvw_freq(rng, nrow=10, nchan=1)
+    block, la, ma = _sloped_block(geom, nso=2, nsi=len(geom["stokes"]) + 1)
+    with pytest.raises(ValueError, match="mueller"):
+        model_to_apparent_vis_for_regions(
+            ds,
+            uvw=uvw,
+            freq=chan,
+            corr_types=("XX",),
+            time=time[0],
+            freq_out=freq[0],
+            stokes_out="IQ",
+            beam_terms=[BeamTerm(block, la, ma)],
+        )
