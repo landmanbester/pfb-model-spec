@@ -195,6 +195,44 @@ def model_geometry(model_ds: xr.Dataset) -> dict[str, Any]:
     }
 
 
+def pixel_lm(
+    geom: dict[str, Any],
+    *,
+    i0: int = 0,
+    j0: int = 0,
+    shape: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sky direction cosines of the pixels of a model grid or a crop of it.
+
+    The convention is the one real measurement-set data follow through the
+    wgridder, ``V = sum I(l, m) exp(+2πi(ul + vm + w(n-1))ν/c)``, with ``l``
+    East and ``m`` North positive. Measured against ducc0 for every
+    ``(flip_u, flip_v)``: ``l = -x0 ± (j - nx//2)·cell`` with ``+`` when
+    ``flip_u``, and ``m = -y0 ± (i - ny//2)·cell`` with ``+`` when ``flip_v``.
+    This is the coordinate a caller evaluates its beam on, so getting it wrong
+    mirrors an asymmetric beam.
+
+    Args:
+        geom: :func:`model_geometry` output (``nx``, ``ny``, ``cell_rad``,
+            ``x0``, ``y0``, ``flip_u``, ``flip_v`` are read).
+        i0: Row of the crop's origin on the full grid (y).
+        j0: Column of the crop's origin on the full grid (x).
+        shape: ``(ny_crop, nx_crop)``; defaults to the rest of the grid.
+
+    Returns:
+        ``(l, m)`` in radians, shapes ``(nx_crop,)`` and ``(ny_crop,)``.
+    """
+    nx, ny, cell = geom["nx"], geom["ny"], geom["cell_rad"]
+    nyc, nxc = shape if shape is not None else (ny - i0, nx - j0)
+    sl = 1.0 if geom["flip_u"] else -1.0
+    sm = 1.0 if geom["flip_v"] else -1.0
+    j = j0 + np.arange(nxc)
+    i = i0 + np.arange(nyc)
+    ll = -geom["x0"] + sl * (j - nx // 2) * cell
+    mm = -geom["y0"] + sm * (i - ny // 2) * cell
+    return ll, mm
+
+
 def model_sampling(model_ds: xr.Dataset) -> dict[str, Any]:
     """The optional sampling fields a `.mds` records (spec 0.1).
 

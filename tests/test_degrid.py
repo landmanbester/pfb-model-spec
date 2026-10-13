@@ -533,3 +533,49 @@ def test_model_sampling_reads_present_and_absent_fields():
 
     g = model_sampling(genesis_dataset())
     assert all(v is None for v in g.values())
+
+
+@pytest.mark.parametrize("flip_u", [False, True])
+@pytest.mark.parametrize("flip_v", [False, True])
+def test_pixel_lm_matches_the_visibility_phase(flip_u, flip_v):
+    """A unit pixel degrids to exp(+2πi(ul + vm)ν/c) at the (l, m) pixel_lm reports.
+
+    +2πi is the convention real MS data follow through this pipeline (pfb-imaging's
+    image-and-beam-orientation wiki §2). A wrong sign on either axis mirrors any
+    asymmetric beam, invisibly to Stokes-I tests, so every flip pair is checked and
+    the grid is non-square.
+    """
+    from pfb_model_spec.utils.degrid import pixel_lm
+
+    c = 299792458.0
+    rng = np.random.default_rng(5)
+    uvw = rng.normal(0.0, 300.0, (64, 3))
+    uvw[:, 2] = 0.0
+    freq = np.array([1.0e9])
+    ny, nx, cell = 48, 64, 1e-4
+    geom = dict(nx=nx, ny=ny, cell_rad=cell, x0=3e-3, y0=-2e-3, flip_u=flip_u, flip_v=flip_v)
+    iy, ix = 10, 40
+    image = np.zeros((1, ny, nx))
+    image[0, iy, ix] = 1.0
+    vis = degrid_stokes(
+        uvw,
+        freq,
+        image,
+        cell_rad=cell,
+        x0=geom["x0"],
+        y0=geom["y0"],
+        flip_u=flip_u,
+        flip_v=flip_v,
+        flip_w=False,
+        epsilon=1e-10,
+        do_wgridding=False,
+    )[0, :, 0]
+    lax, max_ = pixel_lm(geom)
+    assert lax.shape == (nx,) and max_.shape == (ny,)
+    expected = np.exp(2j * np.pi * (uvw[:, 0] * lax[ix] + uvw[:, 1] * max_[iy]) * freq[0] / c)
+    assert_allclose(vis, expected, atol=1e-7)
+
+    # a crop reports the same coordinates for the same pixels
+    lc, mc = pixel_lm(geom, i0=4, j0=30, shape=(12, 16))
+    assert_allclose(lc, lax[30:46])
+    assert_allclose(mc, max_[4:16])
