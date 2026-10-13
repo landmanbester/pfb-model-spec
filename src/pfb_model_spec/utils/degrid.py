@@ -12,7 +12,7 @@ of the fused wrapper never transposes at all.
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import xarray as xr
@@ -195,6 +195,203 @@ def model_geometry(model_ds: xr.Dataset) -> dict[str, Any]:
     }
 
 
+def pixel_lm(
+    geom: dict[str, Any],
+    *,
+    i0: int = 0,
+    j0: int = 0,
+    shape: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sky direction cosines of the pixels of a model grid or a crop of it.
+
+    The convention is the one real measurement-set data follow through the
+    wgridder, ``V = sum I(l, m) exp(+2πi(ul + vm + w(n-1))ν/c)``, with ``l``
+    East and ``m`` North positive. Measured against ducc0 for every
+    ``(flip_u, flip_v)``: ``l = -x0 ± (j - nx//2)·cell`` with ``+`` when
+    ``flip_u``, and ``m = -y0 ± (i - ny//2)·cell`` with ``+`` when ``flip_v``.
+    This is the coordinate a caller evaluates its beam on, so getting it wrong
+    mirrors an asymmetric beam.
+
+    Args:
+        geom: :func:`model_geometry` output (``nx``, ``ny``, ``cell_rad``,
+            ``x0``, ``y0``, ``flip_u``, ``flip_v`` are read).
+        i0: Row of the crop's origin on the full grid (y).
+        j0: Column of the crop's origin on the full grid (x).
+        shape: ``(ny_crop, nx_crop)``; defaults to the rest of the grid.
+
+    Returns:
+        ``(l, m)`` in radians, shapes ``(nx_crop,)`` and ``(ny_crop,)``.
+    """
+    nx, ny, cell = geom["nx"], geom["ny"], geom["cell_rad"]
+    nyc, nxc = shape if shape is not None else (ny - i0, nx - j0)
+    sl = 1.0 if geom["flip_u"] else -1.0
+    sm = 1.0 if geom["flip_v"] else -1.0
+    j = j0 + np.arange(nxc)
+    i = i0 + np.arange(nyc)
+    ll = -geom["x0"] + sl * (j - nx // 2) * cell
+    mm = -geom["y0"] + sm * (i - ny // 2) * cell
+    return ll, mm
+
+
+class RegionMask(NamedTuple):
+    """A region's weights, cropped to the region's bounding box.
+
+    Cropping is a pure optimisation, and a large one: a region is degridded by
+    its own `dirty2vis` call, whose cost scales with the grid it is handed, not
+    with the flux on it. Measured in pfb-imaging#331 on a 6720^2 model with three
+    regions, the per-chunk gridder time fell from 3 x 5.29 s to 5.29 + 0.64 + 0.51 s. It
+    also shrinks what the driver ships to each replica -- a full-grid float64
+    mask is 361 MB at 6720^2, and a small region's is under 1 MB.
+
+    Attributes:
+        mask: `(nyc, nxc)` float64 weights, (Y, X) like the model.
+        i0: Index along y of the mask's origin in the full model grid.
+        j0: Index along x of the mask's origin in the full model grid.
+    """
+
+    mask: np.ndarray
+    i0: int
+    j0: int
+
+
+def _even_span(lo: int, hi: int, n: int) -> tuple[int, int]:
+    """Grow `[lo, hi)` to an even length without leaving `[0, n)`.
+
+    ducc's wgridder asserts `nx_dirty must be even`, so a bounding box of odd
+    extent cannot be handed to it. Growing outwards keeps the box a window on
+    real model pixels, which padding with zeros would not.
+    """
+    if (hi - lo) % 2 == 0:
+        return lo, hi
+    if hi < n:
+        return lo, hi + 1
+    if lo > 0:
+        return lo - 1, hi
+    # the full axis is odd, so no even window exists; the uncropped grid would
+    # fail the same assertion, and that is the error worth surfacing
+    return lo, hi
+
+
+def crop_bbox(mask: np.ndarray) -> RegionMask:
+    """Crop a full-grid mask to the bounding box of its non-zero pixels.
+
+    The box is grown by at most one pixel per axis so that both extents are
+    even, which ducc requires (see `_even_span`).
+
+    Args:
+        mask: `(ny, nx)` weights, (Y, X) like the model.
+
+    Returns:
+        The cropped mask and its origin. An all-zero mask crops to a `(2, 2)`
+        zero box at the origin -- `degrid_stokes` skips an empty plane
+        outright, so the degenerate box is never gridded.
+    """
+    ny, nx = mask.shape
+    ys = np.flatnonzero(mask.any(axis=1))
+    xs = np.flatnonzero(mask.any(axis=0))
+    if xs.size == 0 or ys.size == 0:
+        return RegionMask(np.zeros((min(2, ny), min(2, nx)), dtype=mask.dtype), 0, 0)
+    i0, i1 = _even_span(int(ys[0]), int(ys[-1]) + 1, ny)
+    j0, j1 = _even_span(int(xs[0]), int(xs[-1]) + 1, nx)
+    return RegionMask(np.ascontiguousarray(mask[i0:i1, j0:j1]), i0, j0)
+
+
+def crop_phase_centre(
+    *,
+    x0: float,
+    y0: float,
+    cell_rad: float,
+    flip_u: bool,
+    flip_v: bool,
+    nx: int,
+    ny: int,
+    rm: RegionMask,
+) -> tuple[float, float]:
+    """The `center_x`/`center_y` a cropped sub-grid must be degridded with.
+
+    ducc places image pixel `i` at `(i - nx // 2) * cell` from the image
+    centre, so cropping moves the centre by the shift in that origin --
+    `j0 + nxc // 2 - nx // 2` pixels along x and `i0 + nyc // 2 - ny // 2`
+    along y. The sign is the axis's flip convention: `flip_u`/`flip_v` negate
+    the direction the offset is measured in. Getting either sign wrong is not
+    a small error -- it puts the model in the wrong place on the sky, and the
+    visibilities come back order-unity wrong (`test_crop_phase_centre_reproduces_the_full_grid_degrid`
+    checks all four flip combinations).
+
+    Args:
+        x0: The model's own `center_x`, from `model_geometry`.
+        y0: The model's own `center_y`.
+        cell_rad: Pixel size in radians (square pixels).
+        flip_u: The model's U-axis flip convention.
+        flip_v: The model's V-axis flip convention.
+        nx: Full model grid size along x.
+        ny: Full model grid size along y.
+        rm: The cropped mask whose grid the offsets are wanted for.
+
+    Returns:
+        `(center_x, center_y)` for `degrid_stokes`.
+    """
+    nyc, nxc = rm.mask.shape
+    sx = -1.0 if flip_u else 1.0
+    sy = -1.0 if flip_v else 1.0
+    return (
+        x0 + sx * (rm.j0 + nxc // 2 - nx // 2) * cell_rad,
+        y0 + sy * (rm.i0 + nyc // 2 - ny // 2) * cell_rad,
+    )
+
+
+def _linear_weights(axis: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Left index, right weight and in-range flag for linear interpolation on `axis`."""
+    k = np.clip(np.searchsorted(axis, x, side="right") - 1, 0, axis.size - 2)
+    w = (x - axis[k]) / (axis[k + 1] - axis[k])
+    inside = (x >= axis[0]) & (x <= axis[-1])
+    return k, w, inside
+
+
+def interp_mueller(
+    mueller: np.ndarray,
+    l_axis: np.ndarray,
+    m_axis: np.ndarray,
+    l: np.ndarray,  # noqa: E741 -- the (l, m) name of the interface
+    m: np.ndarray,
+) -> np.ndarray:
+    """Bilinearly interpolate a coarse Mueller block onto a separable pixel grid.
+
+    A primary beam is smooth on the scale of a model pixel, so callers evaluate
+    it on a coarse grid and interpolate here, separably: along l for each coarse
+    m row, then along m. The cost is O(ny·nx) per entry and no full-resolution
+    coordinate mesh is built. Points outside the coarse axes get 0, matching
+    meerkat-beams' off-cube value.
+
+    Args:
+        mueller: ``(..., nm, nl)`` on ``(m_axis, l_axis)``; real or complex.
+        l_axis: ``(nl,)`` strictly ascending, radians.
+        m_axis: ``(nm,)`` strictly ascending, radians.
+        l: ``(nx,)`` target l, any order (from :func:`pixel_lm`).
+        m: ``(ny,)`` target m, any order.
+
+    Returns:
+        ``(..., ny, nx)``, same dtype as ``mueller``.
+
+    Raises:
+        ValueError: If an axis is not strictly ascending, has fewer than two
+            points, or does not match ``mueller``'s trailing shape.
+    """
+    for name, axis in (("l_axis", l_axis), ("m_axis", m_axis)):
+        if axis.size < 2 or not np.all(np.diff(axis) > 0):
+            raise ValueError(f"{name} must be strictly ascending with at least two points")
+    if mueller.shape[-2:] != (m_axis.size, l_axis.size):
+        raise ValueError(f"mueller grid {mueller.shape[-2:]} does not match (m, l) axes {(m_axis.size, l_axis.size)}")
+    kl, wl, inl = _linear_weights(l_axis, l)
+    km, wm, inm = _linear_weights(m_axis, m)
+    # weights in the block's real dtype so float32/complex64 blocks are not promoted
+    rdt = np.finfo(mueller.dtype).dtype
+    wl, wm = wl.astype(rdt), wm.astype(rdt)
+    along_l = mueller[..., kl] * (1 - wl) + mueller[..., kl + 1] * wl  # (..., nm, nx)
+    out = along_l[..., km, :] * (1 - wm)[:, None] + along_l[..., km + 1, :] * wm[:, None]
+    return out * (inm[:, None] & inl[None, :])
+
+
 def model_sampling(model_ds: xr.Dataset) -> dict[str, Any]:
     """The optional sampling fields a `.mds` records (spec 0.1).
 
@@ -315,7 +512,7 @@ def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
 
     Args:
         stokes_image: Intrinsic model, shape ``(nstokes_in, ny, nx)``.
-        mueller: Real Mueller block, shape ``(nstokes_out, nstokes_in, ny, nx)``
+        mueller: Real or complex Mueller block, shape ``(nstokes_out, nstokes_in, ny, nx)``
             on the same grid as ``stokes_image``.
 
     Returns:
@@ -335,7 +532,92 @@ def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
     return np.einsum("ijxy,jxy->ixy", mueller, stokes_image)
 
 
-def model_to_apparent_vis_for_region(
+def _degrid_real_imag(
+    uvw: np.ndarray, freq: np.ndarray, image: np.ndarray, *, sign: np.ndarray | None = None, **kw: Any
+) -> np.ndarray:
+    """Degrid a real or complex image; ducc takes only real ones, so a complex one goes as Re + i·sign·Im."""
+    vis = degrid_stokes(uvw, freq, np.ascontiguousarray(image.real), **kw)
+    if np.iscomplexobj(image):
+        vis_im = degrid_stokes(uvw, freq, np.ascontiguousarray(image.imag), **kw)
+        vis = vis + 1j * (vis_im if sign is None else sign[None, :, None] * vis_im)
+    return vis
+
+
+class BeamTerm(NamedTuple):
+    """One primary beam and the visibility rows it applies to.
+
+    The caller builds the beam (pfb-model-spec never depends on a beam package):
+    a Stokes-basis Mueller block on a coarse, ascending (m, l) grid in the
+    :func:`pixel_lm` convention, interpolated onto each region here. Several
+    terms partition the rows between beams -- a mixed array's baseline groups --
+    and ``conj_rows`` marks rows whose baseline ordering is reversed relative to
+    the beam's, which take ``conj(mueller)`` (meerkat-beams' MeerKAT/MeerKAT+
+    cross group). A complex block is predicted exactly, by degridding its real
+    and imaginary parts separately. Pixels outside ``(l_axis, m_axis)`` see a
+    zero beam, so the axes must cover every region the term is applied to.
+
+    Attributes:
+        mueller: ``(nso, nsi, nmb, nlb)``, real or complex, bare primary beam.
+        l_axis: ``(nlb,)`` ascending, radians.
+        m_axis: ``(nmb,)`` ascending, radians.
+        rows: ``(nrow,)`` bool, the rows this term predicts; ``None`` means all.
+        conj_rows: ``(nrow,)`` bool, a subset of ``rows`` taking the conjugate.
+    """
+
+    mueller: np.ndarray
+    l_axis: np.ndarray
+    m_axis: np.ndarray
+    rows: np.ndarray | None = None
+    conj_rows: np.ndarray | None = None
+
+
+def _check_beam_terms(terms: Sequence[BeamTerm], nrow: int, nso: int, nsi: int) -> None:
+    """Refuse beam terms that would mislabel planes or double-count rows."""
+    covered = np.zeros(nrow, dtype=bool)
+    for term in terms:
+        if term.mueller.ndim != 4 or term.mueller.shape[:2] != (nso, nsi):
+            raise ValueError(f"mueller must be (nso={nso}, nsi={nsi}, nm, nl), got {term.mueller.shape}")
+        rows = np.ones(nrow, dtype=bool) if term.rows is None else np.asarray(term.rows, dtype=bool)
+        if rows.shape != (nrow,):
+            raise ValueError(f"rows must have shape ({nrow},), got {rows.shape}")
+        if (covered & rows).any():
+            raise ValueError("beam terms' rows must be disjoint")
+        covered |= rows
+        if term.conj_rows is not None:
+            conj = np.asarray(term.conj_rows, dtype=bool)
+            if conj.shape != (nrow,) or (conj & ~rows).any():
+                raise ValueError("conj_rows must be a subset of the term's rows")
+
+
+def _degrid_beam_term(
+    uvw: np.ndarray,
+    freq: np.ndarray,
+    sub: np.ndarray,
+    term: BeamTerm,
+    l: np.ndarray,  # noqa: E741
+    m: np.ndarray,
+    mask: np.ndarray | None,
+    kw: dict[str, Any],
+) -> np.ndarray:
+    """Attenuate one region by one beam term and degrid it onto the term's rows."""
+    nrow = uvw.shape[0]
+    nso, nsi = term.mueller.shape[:2]
+    term_mask = mask
+    if term.rows is not None:
+        rows = np.asarray(term.rows, dtype=np.uint8)[:, None]
+        term_mask = np.ascontiguousarray(np.broadcast_to(rows, (nrow, freq.size)) if mask is None else mask * rows)
+    sign = None if term.conj_rows is None else np.where(term.conj_rows, -1.0, 1.0)
+    vis = np.zeros((nso, nrow, freq.size), dtype=np.complex128)
+    # one apparent plane at a time: neither the (nso, nsi, ny, nx) Mueller block
+    # nor the (nso, ny, nx) complex apparent cube (2.9 GB at 6720^2 for a 4x4
+    # beam) is ever held whole
+    for o in range(nso):
+        plane = sum(interp_mueller(term.mueller[o, i], term.l_axis, term.m_axis, l, m) * sub[i] for i in range(nsi))
+        vis[o] = _degrid_real_imag(uvw, freq, plane[None], sign=sign, mask=term_mask, **kw)[0]
+    return vis
+
+
+def model_to_apparent_vis_for_regions(
     model_ds: xr.Dataset,
     *,
     uvw: np.ndarray,
@@ -343,107 +625,121 @@ def model_to_apparent_vis_for_region(
     corr_types: Sequence[str],
     time: float,
     freq_out: float,
-    mueller: np.ndarray | None = None,
+    region_masks: Sequence[RegionMask] | None = None,
     stokes_out: str | Sequence[str] | None = None,
+    beam_terms: Sequence[BeamTerm] | None = None,
     mask: np.ndarray | None = None,
-    region_mask: np.ndarray | None = None,
     epsilon: float = 1e-7,
     do_wgridding: bool = True,
     divide_by_n: bool = False,
     nthreads: int = 1,
-) -> np.ndarray:
-    """Render a model and degrid it to apparent correlated visibilities.
+) -> list[np.ndarray]:
+    """Render a model once and degrid each region, optionally through beams.
 
-    Composes :func:`render_model_region`, :func:`apply_mueller`,
-    :func:`degrid_stokes` and :func:`stokes_vis_to_corr` for one chunk of data.
-    The primitives remain separately callable for consumers that need only part
-    of the chain.
+    The fused per-chunk wrapper over :func:`render_model_region`,
+    :func:`interp_mueller`, :func:`degrid_stokes` and :func:`stokes_vis_to_corr`,
+    which stay separately callable for consumers that need only part of the
+    chain. The model is rendered once per chunk,
+    each region is degridded on its cropped bounding box with a shifted phase
+    centre, and each :class:`BeamTerm` attenuates the region on the rows it
+    owns. Rows covered by no term predict zero, so a caller that splits rows
+    between beams must cover all of them. ``divide_by_n`` passes straight
+    through; with a bare beam set it ``True`` and ducc folds in ``1/n``.
 
-    The model is always rendered on its own grid, taken from the `.mds` attrs,
-    so no resampling occurs.
+    Each term costs a full gridding pass per output plane (two for a complex
+    block), whatever the share of rows it owns, so splitting rows between K
+    beams costs about K times the FFT work of a single beam.
 
     Args:
         model_ds: An opened `.mds` dataset.
-        uvw: Baseline coordinates in metres, shape ``(nrow, 3)``.
-        freq: Channel frequencies in Hz, shape ``(nchan,)``.
-        corr_types: Output correlations, e.g. ``("XX", "XY", "YX", "YY")``.
-        time: Representative time for the chunk, conventionally the unweighted
-            mean of its time axis.
-        freq_out: Representative frequency in Hz for the chunk, conventionally
-            the unweighted mean of its frequency axis. May lie between the
-            bands the model was fitted at.
-        mueller: Optional Stokes-basis Mueller block on the model grid, shape
-            ``(nstokes_out, nstokes_in, ny, nx)``.
-        stokes_out: Optional Stokes products of the planes being degridded (the
-            rendered image after ``mueller``, if any, has been applied), in
-            that axis's order, e.g. ``"IV"``. Passed as the ``stokes_in``
-            argument to :func:`stokes_vis_to_corr`. When ``None`` (the
-            default): if no Mueller was applied, the model's own ``stokes``
-            coord is used; if a Mueller was applied, the planes are *assumed*
-            to be an ``"IQUV"`` prefix of length ``nstokes_out`` -- this
-            assumption is wrong whenever the Mueller's output axis is not such
-            a prefix (e.g. a 2-plane (I, V) Mueller, mislabelled ``"IQ"`` by
-            the default), so pass ``stokes_out`` explicitly in that case.
-        mask: Optional ``(nrow, nchan)`` visibility mask; zero entries are not
-            degridded and come back as exactly zero.
-        region_mask: Optional ``(ny, nx)`` image mask applied to the rendered
-            model, for degridding a sub-region into its own column.
+        uvw: ``(nrow, 3)`` metres; padded rows must be masked by ``mask``.
+        freq: ``(nchan,)`` Hz.
+        corr_types: Output correlations.
+        time: Representative chunk time, unweighted mean, model time units.
+        freq_out: Representative chunk frequency, unweighted mean, Hz.
+        region_masks: Cropped region masks; ``None`` means one full-grid region.
+        stokes_out: Stokes planes predicted. Without beams a subset of the
+            model's, defaulting to the model's own planes. With beams it
+            names the Mueller output axis and is required: a same-sized
+            output in another order would otherwise be mislabelled silently.
+        beam_terms: Beams and the rows they own; ``None`` applies no beam. An
+            empty sequence is refused rather than predicting zeros.
+        mask: ``(nrow, nchan)`` uint8 structural mask (padding), never flags.
         epsilon: Gridder accuracy.
-        do_wgridding: Perform w-correction via improved w-stacking.
-        divide_by_n: Divide by the geometric n-term; see :func:`apply_mueller`.
-        nthreads: Threads for the gridder.
+        do_wgridding: w-correction via improved w-stacking.
+        divide_by_n: Divide by the geometric n-term in ducc.
+        nthreads: Gridder threads.
 
     Returns:
-        Complex visibilities, shape ``(nrow, nchan, len(corr_types))``.
+        One ``(nrow, nchan, len(corr_types))`` complex array per region.
 
     Raises:
-        ValueError: If ``region_mask``'s grid does not match the model grid,
-            if ``stokes_out``'s length does not match the number of image
-            planes being degridded, or if the composed primitives raise
-            ValueError: non-square pixels from :func:`model_geometry`, an
-            unknown or newer ``.mds`` spec from :func:`model_geometry` or
-            :func:`render_model_region`, a Mueller shape mismatch from
-            :func:`apply_mueller`, or an unsupported correlation from
-            :func:`stokes_vis_to_corr`.
+        ValueError: On a Stokes plane the model lacks, beam terms without
+            ``stokes_out``, inconsistent beam terms, or anything the composed
+            primitives refuse.
     """
-    model_ds = upgrade(model_ds)  # once, so the two readers below need not repeat it
+    model_ds = upgrade(model_ds)
     geom = model_geometry(model_ds)
+    model_stokes = list(geom["stokes"])
+    if beam_terms is not None:
+        if not beam_terms:
+            raise ValueError("beam_terms is empty, which would predict zeros; pass None for no beam")
+        if stokes_out is None:
+            raise ValueError("stokes_out is required with beam_terms: it names the Mueller's output planes")
+    stokes_out = list(stokes_out) if stokes_out is not None else model_stokes
+    if beam_terms is not None:
+        _check_beam_terms(beam_terms, uvw.shape[0], len(stokes_out), len(model_stokes))
+
     image = render_model_region(model_ds, time=time, freq_out=freq_out)
-    stokes_in = geom["stokes"]
+    if beam_terms is None:
+        missing = [s for s in stokes_out if s not in model_stokes]
+        if missing:
+            raise ValueError(f"stokes_out {stokes_out} names {missing}, which the model {model_stokes} lacks")
+        planes = [model_stokes.index(s) for s in stokes_out]
+        if planes != list(range(len(model_stokes))):
+            # fancy indexing copies the whole grid, so only when not the identity
+            image = image[planes]
 
-    if region_mask is not None:
-        if region_mask.shape != image.shape[1:]:
-            raise ValueError(f"region_mask grid {region_mask.shape} does not match the model grid {image.shape[1:]}")
-        image = image * region_mask[None]
-
-    if mueller is not None:
-        image = apply_mueller(image, mueller)
-        # a Mueller may map a single intrinsic Stokes product onto several
-        # apparent ones, so the labels follow its output axis, not the model's
-        stokes_in = "IQUV"[: image.shape[0]]
-
-    if stokes_out is not None:
-        stokes_out = tuple(stokes_out)
-        if len(stokes_out) != image.shape[0]:
-            raise ValueError(
-                f"stokes_out has {len(stokes_out)} entries but the rendered image has {image.shape[0]} planes"
+    out = []
+    # None is the whole grid: no crop, and no full-grid mask of ones to multiply by
+    for rm in [None] if region_masks is None else region_masks:
+        if rm is None:
+            i0, j0, sub = 0, 0, image
+            x0c, y0c = geom["x0"], geom["y0"]
+        else:
+            i0, j0 = rm.i0, rm.j0
+            nyc, nxc = rm.mask.shape
+            sub = image[:, i0 : i0 + nyc, j0 : j0 + nxc] * rm.mask[None]
+            x0c, y0c = crop_phase_centre(
+                x0=geom["x0"],
+                y0=geom["y0"],
+                cell_rad=geom["cell_rad"],
+                flip_u=geom["flip_u"],
+                flip_v=geom["flip_v"],
+                nx=geom["nx"],
+                ny=geom["ny"],
+                rm=rm,
             )
-        stokes_in = stokes_out
-
-    stokes_vis = degrid_stokes(
-        uvw,
-        freq,
-        image,
-        cell_rad=geom["cell_rad"],
-        x0=geom["x0"],
-        y0=geom["y0"],
-        flip_u=geom["flip_u"],
-        flip_v=geom["flip_v"],
-        flip_w=geom["flip_w"],
-        epsilon=epsilon,
-        do_wgridding=do_wgridding,
-        divide_by_n=divide_by_n,
-        nthreads=nthreads,
-        mask=mask,
-    )
-    return stokes_vis_to_corr(stokes_vis, stokes_in, corr_types)
+        kw = dict(
+            cell_rad=geom["cell_rad"],
+            x0=x0c,
+            y0=y0c,
+            flip_u=geom["flip_u"],
+            flip_v=geom["flip_v"],
+            flip_w=geom["flip_w"],
+            epsilon=epsilon,
+            do_wgridding=do_wgridding,
+            divide_by_n=divide_by_n,
+            nthreads=nthreads,
+        )
+        if beam_terms is None:
+            stokes_vis = degrid_stokes(uvw, freq, np.ascontiguousarray(sub), mask=mask, **kw)
+        else:
+            l, m = pixel_lm(geom, i0=i0, j0=j0, shape=sub.shape[1:])  # noqa: E741
+            stokes_vis = np.zeros((len(stokes_out), uvw.shape[0], freq.size), dtype=np.complex128)
+            for term in beam_terms:
+                if term.rows is not None and not np.any(term.rows):
+                    continue  # owns no rows here; skip its gridding passes
+                stokes_vis += _degrid_beam_term(uvw, freq, sub, term, l, m, mask, kw)
+        out.append(stokes_vis_to_corr(stokes_vis, stokes_out, corr_types))
+    return out
