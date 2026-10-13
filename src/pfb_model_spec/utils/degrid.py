@@ -340,6 +340,55 @@ def crop_phase_centre(
     )
 
 
+def _linear_weights(axis: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Left index, right weight and in-range flag for linear interpolation on `axis`."""
+    k = np.clip(np.searchsorted(axis, x, side="right") - 1, 0, axis.size - 2)
+    w = (x - axis[k]) / (axis[k + 1] - axis[k])
+    inside = (x >= axis[0]) & (x <= axis[-1])
+    return k, w, inside
+
+
+def interp_mueller(
+    mueller: np.ndarray,
+    l_axis: np.ndarray,
+    m_axis: np.ndarray,
+    l: np.ndarray,  # noqa: E741 -- the (l, m) name of the interface
+    m: np.ndarray,
+) -> np.ndarray:
+    """Bilinearly interpolate a coarse Mueller block onto a separable pixel grid.
+
+    A primary beam is smooth on the scale of a model pixel, so callers evaluate
+    it on a coarse grid and interpolate here, separably: along l for each coarse
+    m row, then along m. The cost is O(ny·nx) per entry and no full-resolution
+    coordinate mesh is built. Points outside the coarse axes get 0, matching
+    meerkat-beams' off-cube value.
+
+    Args:
+        mueller: ``(..., nm, nl)`` on ``(m_axis, l_axis)``; real or complex.
+        l_axis: ``(nl,)`` strictly ascending, radians.
+        m_axis: ``(nm,)`` strictly ascending, radians.
+        l: ``(nx,)`` target l, any order (from :func:`pixel_lm`).
+        m: ``(ny,)`` target m, any order.
+
+    Returns:
+        ``(..., ny, nx)``, same dtype kind as ``mueller``.
+
+    Raises:
+        ValueError: If an axis is not strictly ascending, has fewer than two
+            points, or does not match ``mueller``'s trailing shape.
+    """
+    for name, axis in (("l_axis", l_axis), ("m_axis", m_axis)):
+        if axis.size < 2 or not np.all(np.diff(axis) > 0):
+            raise ValueError(f"{name} must be strictly ascending with at least two points")
+    if mueller.shape[-2:] != (m_axis.size, l_axis.size):
+        raise ValueError(f"mueller grid {mueller.shape[-2:]} does not match (m, l) axes {(m_axis.size, l_axis.size)}")
+    kl, wl, inl = _linear_weights(l_axis, l)
+    km, wm, inm = _linear_weights(m_axis, m)
+    along_l = mueller[..., kl] * (1.0 - wl) + mueller[..., kl + 1] * wl  # (..., nm, nx)
+    out = along_l[..., km, :] * (1.0 - wm)[:, None] + along_l[..., km + 1, :] * wm[:, None]
+    return out * (inm[:, None] & inl[None, :])
+
+
 def model_sampling(model_ds: xr.Dataset) -> dict[str, Any]:
     """The optional sampling fields a `.mds` records (spec 0.1).
 

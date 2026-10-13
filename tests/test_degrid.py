@@ -663,3 +663,35 @@ def test_crop_bbox_grows_odd_extents_to_even():
     rm = crop_bbox(mask)
     assert rm.mask.shape == (4, 6)
     assert (rm.i0, rm.j0) == (3, 4)
+
+
+def test_interp_mueller_is_exact_on_a_bilinear_field():
+    from pfb_model_spec.utils.degrid import interp_mueller
+
+    la = np.linspace(-0.02, 0.02, 9)
+    ma = np.linspace(-0.01, 0.015, 7)
+    field = 2.0 + 3.0 * la[None, :] - 5.0 * ma[:, None] + 7.0 * la[None, :] * ma[:, None]
+    block = np.stack([field, 1j * field])[:, None]  # (2, 1, nm, nl), complex
+    l = np.array([0.0103, -0.0199, 0.004])  # noqa: E741 -- arbitrary order
+    m = np.array([0.0, 0.0149, -0.0099, 0.007])
+    out = interp_mueller(block, la, ma, l, m)
+    expected = 2.0 + 3.0 * l[None, :] - 5.0 * m[:, None] + 7.0 * l[None, :] * m[:, None]
+    assert out.shape == (2, 1, 4, 3) and np.iscomplexobj(out)
+    assert_allclose(out[0, 0], expected, rtol=1e-12)
+    assert_allclose(out[1, 0], 1j * expected, rtol=1e-12)
+
+
+def test_interp_mueller_is_zero_outside_its_axes():
+    from pfb_model_spec.utils.degrid import interp_mueller
+
+    la = np.linspace(0.0, 1.0, 5)
+    block = np.ones((1, 1, 5, 5))
+    out = interp_mueller(block, la, la, np.array([-0.1, 0.5, 1.1]), np.array([0.5]))
+    assert_allclose(out[0, 0, 0], [0.0, 1.0, 0.0])
+
+
+def test_interp_mueller_rejects_descending_axes():
+    from pfb_model_spec.utils.degrid import interp_mueller
+
+    with pytest.raises(ValueError, match="ascending"):
+        interp_mueller(np.ones((1, 1, 3, 3)), np.array([2.0, 1.0, 0.0]), np.arange(3.0), np.zeros(1), np.zeros(1))
