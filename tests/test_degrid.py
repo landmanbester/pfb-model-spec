@@ -12,7 +12,6 @@ from pfb_model_spec.utils.degrid import (
     degrid_stokes,
     interp_mueller,
     model_geometry,
-    model_to_apparent_vis_for_region,
     model_to_apparent_vis_for_regions,
     pixel_lm,
     render_model_region,
@@ -374,31 +373,39 @@ def test_apply_mueller_rejects_grid_mismatch():
         apply_mueller(img, _mueller(1, 1, 8, 7))
 
 
-def test_fused_wrapper_equals_the_composition():
-    ds, _, time, freq, cell = _synthetic_mds()
-    rng = np.random.default_rng(30)
-    uvw, chan = _uvw_freq(rng, nrow=400, nchan=3)
-    corr = ("XX", "XY", "YX", "YY")
-
-    fused = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
-
+def _composed(ds, uvw, chan, corr, time, freq_out, *, mueller=None, region_mask=None, stokes=None, epsilon=1e-7):
+    """The fused wrapper by hand: render, mask, attenuate, degrid (complex as Re + i·Im), convert."""
     geom = model_geometry(ds)
-    img = render_model_region(ds, time=time[0], freq_out=freq[0])
-    sv = degrid_stokes(
-        uvw,
-        chan,
-        img,
+    image = render_model_region(ds, time=time, freq_out=freq_out)
+    if region_mask is not None:
+        image = image * region_mask[None]
+    if mueller is not None:
+        image = apply_mueller(image, mueller)
+    kw = dict(
         cell_rad=geom["cell_rad"],
         x0=geom["x0"],
         y0=geom["y0"],
         flip_u=geom["flip_u"],
         flip_v=geom["flip_v"],
         flip_w=geom["flip_w"],
+        epsilon=epsilon,
     )
-    manual = stokes_vis_to_corr(sv, geom["stokes"], corr)
+    sv = degrid_stokes(uvw, chan, np.ascontiguousarray(image.real), **kw)
+    if np.iscomplexobj(image):
+        sv = sv + 1j * degrid_stokes(uvw, chan, np.ascontiguousarray(image.imag), **kw)
+    return stokes_vis_to_corr(sv, geom["stokes"] if stokes is None else stokes, corr)
 
+
+def test_fused_wrapper_equals_the_composition():
+    ds, _, time, freq, cell = _synthetic_mds()
+    rng = np.random.default_rng(30)
+    uvw, chan = _uvw_freq(rng, nrow=400, nchan=3)
+    corr = ("XX", "XY", "YX", "YY")
+    (fused,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0]
+    )
     assert fused.shape == (uvw.shape[0], chan.size, 4)
-    assert_allclose(fused, manual)
+    assert_allclose(fused, _composed(ds, uvw, chan, corr, time[0], freq[0]))
 
 
 def test_fused_wrapper_region_mask_selects_components():
@@ -414,64 +421,41 @@ def test_fused_wrapper_region_mask_selects_components():
     outside = 1.0 - inside
 
     kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
-    whole = model_to_apparent_vis_for_region(ds, **kw)
-    part_a = model_to_apparent_vis_for_region(ds, region_mask=inside, **kw)
-    part_b = model_to_apparent_vis_for_region(ds, region_mask=outside, **kw)
+    (whole,) = model_to_apparent_vis_for_regions(ds, **kw)
+    part_a, part_b = model_to_apparent_vis_for_regions(ds, region_masks=[crop_bbox(inside), crop_bbox(outside)], **kw)
 
     assert_allclose(part_a + part_b, whole, atol=1e-10)
     assert np.abs(part_a).max() > 0.0
     assert np.abs(part_b).max() > 0.0
 
 
-def test_fused_wrapper_identity_mueller_matches_no_beam():
-    ds, _, time, freq, _ = _synthetic_mds()
-    rng = np.random.default_rng(32)
-    uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
-    corr = ("XX", "YY")
-    nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
-    kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
-    no_beam = model_to_apparent_vis_for_region(ds, **kw)
-    with_beam = model_to_apparent_vis_for_region(ds, mueller=_mueller(1, 1, ny, nx), **kw)
-    assert_allclose(with_beam, no_beam, atol=1e-10)
+def test_stokes_out_labels_the_mueller_output_axis():
+    """With a beam, `stokes_out` names the Mueller's output planes, here a non-prefix (I, V).
 
-
-def test_stokes_out_relabels_a_non_prefix_mueller():
-    """A 2-plane (I, V) Mueller output is mislabelled "IQ" by the default
-    IQUV-prefix assumption; `stokes_out` lets the caller name it correctly.
     Circular correlations make the I/V distinction visible (Q does not enter
-    RR/LL)."""
+    RR/LL). There is no default to guess from: leaving `stokes_out` as the
+    model's single plane is refused for a 2-plane output.
+    """
     ds, _, time, freq, _ = _synthetic_mds()
+    geom = model_geometry(ds)
     rng = np.random.default_rng(33)
     uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
     corr = ("RR", "LL")
-    nx, ny = ds.attrs["npix_x"], ds.attrs["npix_y"]
 
     # a genuine (I, V) Mueller: plane 0 keeps I, plane 1 leaks some I into V
-    mueller = np.zeros((2, 1, ny, nx))
-    mueller[0, 0] = 1.0
-    mueller[1, 0] = 0.3
+    la, ma = _flat_axes(geom)
+    block = np.zeros((2, 1, ma.size, la.size))
+    block[0, 0] = 1.0
+    block[1, 0] = 0.3
 
-    kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0], mueller=mueller)
-    labelled = model_to_apparent_vis_for_region(ds, stokes_out="IV", **kw)
-    default = model_to_apparent_vis_for_region(ds, **kw)
-
-    geom = model_geometry(ds)
-    image = apply_mueller(render_model_region(ds, time=time[0], freq_out=freq[0]), mueller)
-    stokes_vis = degrid_stokes(
-        uvw,
-        chan,
-        image,
-        cell_rad=geom["cell_rad"],
-        x0=geom["x0"],
-        y0=geom["y0"],
-        flip_u=geom["flip_u"],
-        flip_v=geom["flip_v"],
-        flip_w=geom["flip_w"],
-    )
-    manual = stokes_vis_to_corr(stokes_vis, "IV", corr)
-
+    kw = dict(uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
+    (labelled,) = model_to_apparent_vis_for_regions(ds, stokes_out="IV", beam_terms=[BeamTerm(block, la, ma)], **kw)
+    mueller = np.broadcast_to(np.array([[1.0], [0.3]])[:, :, None, None], (2, 1, geom["ny"], geom["nx"]))
+    manual = _composed(ds, uvw, chan, corr, time[0], freq[0], mueller=mueller, stokes="IV")
     assert_allclose(labelled, manual)
-    assert not np.allclose(labelled, default)
+
+    with pytest.raises(ValueError, match="mueller"):
+        model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
 
 
 def test_stokes_out_rejects_length_mismatch():
@@ -479,7 +463,7 @@ def test_stokes_out_rejects_length_mismatch():
     rng = np.random.default_rng(34)
     uvw, chan = _uvw_freq(rng, nrow=50, nchan=2)
     with pytest.raises(ValueError, match="stokes_out"):
-        model_to_apparent_vis_for_region(
+        model_to_apparent_vis_for_regions(
             ds,
             uvw=uvw,
             freq=chan,
@@ -496,7 +480,7 @@ def test_genesis_model_degrids_like_its_x_major_render():
     ds = genesis_dataset()
     rng = np.random.default_rng(40)
     uvw, chan = _uvw_freq(rng, nrow=300, nchan=2)
-    got = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=("XX",), time=0.0, freq_out=FREQS[2])
+    (got,) = model_to_apparent_vis_for_regions(ds, uvw=uvw, freq=chan, corr_types=("XX",), time=0.0, freq_out=FREQS[2])
     want = dirty2vis(
         uvw=uvw,
         freq=chan,
@@ -737,16 +721,6 @@ def _sloped_block(geom, nso=1, nsi=1, scale=1.0):
     return block, la, ma
 
 
-def test_regions_without_beam_match_the_singular_wrapper():
-    ds, _, time, freq, cell = _synthetic_mds()
-    rng = np.random.default_rng(31)
-    uvw, chan = _uvw_freq(rng, nrow=300, nchan=3)
-    corr = ("XX", "XY", "YX", "YY")
-    (got,) = model_to_apparent_vis_for_regions(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
-    ref = model_to_apparent_vis_for_region(ds, uvw=uvw, freq=chan, corr_types=corr, time=time[0], freq_out=freq[0])
-    assert_allclose(got, ref, rtol=0, atol=1e-12 * np.abs(ref).max())
-
-
 def test_regions_identity_beam_term_matches_no_beam():
     ds, _, time, freq, cell = _synthetic_mds()
     geom = model_geometry(ds)
@@ -778,8 +752,8 @@ def test_regions_beam_term_crop_matches_full_grid():
         ds, region_masks=[crop_bbox(full_mask)], beam_terms=[BeamTerm(block, la, ma)], **kw
     )
     full_block = interp_mueller(block, la, ma, *pixel_lm(geom))
-    ref = model_to_apparent_vis_for_region(
-        ds, mueller=full_block, stokes_out=geom["stokes"], region_mask=full_mask, **kw
+    ref = _composed(
+        ds, uvw, chan, kw["corr_types"], time[0], freq[0], mueller=full_block, region_mask=full_mask, epsilon=1e-10
     )
     assert_allclose(got, ref, rtol=0, atol=1e-7 * np.abs(ref).max())
 
@@ -949,18 +923,26 @@ def test_regions_refuse_an_empty_list_of_beam_terms():
         )
 
 
-def test_singular_wrapper_takes_a_complex_mueller():
-    """The singular wrapper degrids a complex block as Re + i·Im, matching the regions path."""
+def test_regions_complex_beam_matches_the_composition():
+    """A complex block is degridded as Re + i·Im, one plane at a time, without changing the answer."""
     ds, _, time, freq, cell = _synthetic_mds()
     geom = model_geometry(ds)
     rng = np.random.default_rng(43)
     uvw, chan = _uvw_freq(rng, nrow=200, nchan=2)
     block, la, ma = _sloped_block(geom, nso=4, nsi=1, scale=1.0 + 0.3j)
     block[3, 0] = 0.07j * block[0, 0]
-    kw = dict(
-        uvw=uvw, freq=chan, corr_types=("XX", "XY", "YX", "YY"), time=time[0], freq_out=freq[0], stokes_out="IQUV"
+    corr = ("XX", "XY", "YX", "YY")
+    (got,) = model_to_apparent_vis_for_regions(
+        ds,
+        uvw=uvw,
+        freq=chan,
+        corr_types=corr,
+        time=time[0],
+        freq_out=freq[0],
+        stokes_out="IQUV",
+        beam_terms=[BeamTerm(block, la, ma)],
+        epsilon=1e-10,
     )
     full = interp_mueller(block, la, ma, *pixel_lm(geom))
-    got = model_to_apparent_vis_for_region(ds, mueller=full, **kw)
-    (ref,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
-    assert_allclose(got, ref, rtol=0, atol=1e-10 * np.abs(ref).max())
+    ref = _composed(ds, uvw, chan, corr, time[0], freq[0], mueller=full, stokes="IQUV", epsilon=1e-10)
+    assert_allclose(got, ref, rtol=0, atol=1e-8 * np.abs(ref).max())
