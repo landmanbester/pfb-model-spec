@@ -144,7 +144,7 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   defaults to `False` and passes straight through: a caller with a bare beam must pass `True`**
   so ducc folds in `1/n`; only a beam that already contains `1/n` keeps `False`.
 
-**Why five functions and not one.** Three consumers need pieces rather than the whole:
+**Why primitives plus two fused wrappers, not one function.** Three consumers need pieces rather than the whole:
 `--transfer-model-from` (ratt-ru/pfb-imaging#309) needs only `render_model_region`;
 region-file degridding (ratt-ru/pfb-imaging#115) renders once and degrids N+1 times behind
 different masks; chunks sharing a `(time, freq)` bin can reuse one rendering.
