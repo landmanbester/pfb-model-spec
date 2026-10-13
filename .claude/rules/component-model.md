@@ -125,6 +125,24 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   `africanus.model.coherency.convert` (verified elementwise) but are hard-coded, because
   tests here must not depend on africanus.
 - `model_to_apparent_vis_for_region(…)` — the fused per-chunk wrapper over the above.
+- `pixel_lm(geom, *, i0, j0, shape)` → `(l, m)` axes of the model grid or a crop of it. The
+  convention is the wgridder's `V = Σ I exp(+2πi(ul + vm + w(n-1))ν/c)`, `l` East and `m` North,
+  measured against ducc0 for all four `(flip_u, flip_v)`. Evaluate a beam on these, or an
+  asymmetric beam comes out mirrored.
+- `interp_mueller(mueller, l_axis, m_axis, l, m)` — separable bilinear interpolation of a coarse
+  Mueller block onto the pixel axes (no full-resolution mesh); points outside the coarse axes are 0.
+- `crop_bbox(mask)` → `RegionMask(mask, i0, j0)` and `crop_phase_centre(…)` — region cropping and
+  the shifted phase centre. They live here since #27 (moved from ratt-ru/pfb-imaging#331).
+- `BeamTerm(mueller, l_axis, m_axis, rows=None, conj_rows=None)` — one bare primary beam
+  `(nso, nsi, nmb, nlb)`, real or complex, plus the rows it owns. `conj_rows` (a subset of
+  `rows`) take `conj(mueller)`, for baseline orderings reversed relative to the beam's. The
+  caller builds the beam; this package never depends on a beam library.
+- `model_to_apparent_vis_for_regions(…, region_masks, beam_terms, stokes_out, divide_by_n=False)`
+  → one `(nrow, nchan, ncorr)` array per region. Renders the model once, crops each region to
+  its bounding box with a shifted phase centre, and applies each `BeamTerm` on its rows. A
+  complex beam is degridded as Re + i·Im. Rows covered by no term predict zero. **`divide_by_n`
+  defaults to `False` and passes straight through: a caller with a bare beam must pass `True`**
+  so ducc folds in `1/n`; only a beam that already contains `1/n` keeps `False`.
 
 **Why five functions and not one.** Three consumers need pieces rather than the whole:
 `--transfer-model-from` (ratt-ru/pfb-imaging#309) needs only `render_model_region`;
