@@ -140,8 +140,8 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   → one `(nrow, nchan, ncorr)` array per region; the only fused per-chunk wrapper (the
   single-region `model_to_apparent_vis_for_region` was folded into it). Renders the model once,
   crops each region to its bounding box with a shifted phase centre, and applies each `BeamTerm`
-  on its rows. With beams, `stokes_out` names the Mueller's output planes and must match their
-  number; there is no default guess. A complex beam is degridded as Re + i·Im, one output plane
+  on its rows. With beams, `stokes_out` is required: it names the Mueller's output planes (a
+  same-sized output in another order would otherwise be mislabelled silently). A complex beam is degridded as Re + i·Im, one output plane
   at a time. Rows covered by no term predict zero; an empty `beam_terms` is refused. Each term is
   a full gridding pass per plane, so K row groups cost about K× the FFT work. **`divide_by_n`
   defaults to `False` and passes straight through: a caller with a bare beam must pass `True`**

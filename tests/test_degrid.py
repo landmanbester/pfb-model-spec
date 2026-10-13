@@ -433,8 +433,8 @@ def test_stokes_out_labels_the_mueller_output_axis():
     """With a beam, `stokes_out` names the Mueller's output planes, here a non-prefix (I, V).
 
     Circular correlations make the I/V distinction visible (Q does not enter
-    RR/LL). There is no default to guess from: leaving `stokes_out` as the
-    model's single plane is refused for a 2-plane output.
+    RR/LL). There is no default to guess from: with beams, leaving
+    `stokes_out` out is refused, even when the Mueller's output count would match.
     """
     ds, _, time, freq, _ = _synthetic_mds()
     geom = model_geometry(ds)
@@ -454,8 +454,8 @@ def test_stokes_out_labels_the_mueller_output_axis():
     manual = _composed(ds, uvw, chan, corr, time[0], freq[0], mueller=mueller, stokes="IV")
     assert_allclose(labelled, manual)
 
-    with pytest.raises(ValueError, match="mueller"):
-        model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
+    with pytest.raises(ValueError, match="stokes_out is required"):
+        model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block[:1], la, ma)], **kw)
 
 
 def test_stokes_out_rejects_length_mismatch():
@@ -732,6 +732,7 @@ def test_regions_identity_beam_term_matches_no_beam():
     for k in range(nsi):
         ident[k, k] = 1.0
     kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], divide_by_n=True)
+    kw["stokes_out"] = geom["stokes"]
     (beam,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(ident, la, ma)], **kw)
     (bare,) = model_to_apparent_vis_for_regions(ds, **kw)
     assert_allclose(beam, bare, rtol=0, atol=1e-12 * np.abs(bare).max())
@@ -749,7 +750,7 @@ def test_regions_beam_term_crop_matches_full_grid():
     full_mask[:, : geom["nx"] // 2] = 1.0
     kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], epsilon=1e-10)
     (got,) = model_to_apparent_vis_for_regions(
-        ds, region_masks=[crop_bbox(full_mask)], beam_terms=[BeamTerm(block, la, ma)], **kw
+        ds, region_masks=[crop_bbox(full_mask)], beam_terms=[BeamTerm(block, la, ma)], stokes_out=geom["stokes"], **kw
     )
     full_block = interp_mueller(block, la, ma, *pixel_lm(geom))
     ref = _composed(
@@ -785,7 +786,7 @@ def test_regions_terms_over_a_row_split_add_up():
     a, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
     b = 0.5 * a
     even = np.arange(uvw.shape[0]) % 2 == 0
-    kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0])
+    kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], stokes_out=geom["stokes"])
     (both,) = model_to_apparent_vis_for_regions(
         ds, beam_terms=[BeamTerm(a, la, ma, rows=even), BeamTerm(b, la, ma, rows=~even)], **kw
     )
@@ -816,7 +817,14 @@ def test_regions_refuse_inconsistent_beam_terms(rows, conj_rows, match):
         terms = [BeamTerm(a, la, ma, rows=even, conj_rows=~even)]
     with pytest.raises(ValueError, match=match):
         model_to_apparent_vis_for_regions(
-            ds, uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], beam_terms=terms
+            ds,
+            uvw=uvw,
+            freq=chan,
+            corr_types=("XX",),
+            time=time[0],
+            freq_out=freq[0],
+            stokes_out=geom["stokes"],
+            beam_terms=terms,
         )
 
 
@@ -851,6 +859,7 @@ def test_regions_that_partition_the_grid_add_up_to_the_whole():
     regions = [crop_bbox(left), crop_bbox(1.0 - left)]
     block, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
     kw = dict(uvw=uvw, freq=chan, corr_types=("XX", "YY"), time=time[0], freq_out=freq[0], epsilon=1e-10)
+    kw["stokes_out"] = geom["stokes"]
     for terms in (None, [BeamTerm(block, la, ma)]):
         parts = model_to_apparent_vis_for_regions(ds, region_masks=regions, beam_terms=terms, **kw)
         (whole,) = model_to_apparent_vis_for_regions(ds, beam_terms=terms, **kw)
@@ -893,7 +902,9 @@ def test_regions_beam_rows_respect_the_padding_mask():
     block, la, ma = _sloped_block(geom, nso=nsi, nsi=nsi)
     even = np.arange(uvw.shape[0]) % 2 == 0
     mask = (rng.random((uvw.shape[0], chan.size)) > 0.3).astype(np.uint8)
-    kw = dict(uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], epsilon=1e-10)
+    kw = dict(
+        uvw=uvw, freq=chan, corr_types=("XX",), time=time[0], freq_out=freq[0], stokes_out=geom["stokes"], epsilon=1e-10
+    )
     (got,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma, rows=even)], mask=mask, **kw)
     (ref,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
     keep = (mask.astype(bool) & even[:, None])[..., None]

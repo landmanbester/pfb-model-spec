@@ -659,8 +659,9 @@ def model_to_apparent_vis_for_regions(
         freq_out: Representative chunk frequency, unweighted mean, Hz.
         region_masks: Cropped region masks; ``None`` means one full-grid region.
         stokes_out: Stokes planes predicted. Without beams a subset of the
-            model's; with beams the Mueller output axis. Defaults to the
-            model's own planes.
+            model's, defaulting to the model's own planes. With beams it
+            names the Mueller output axis and is required: a same-sized
+            output in another order would otherwise be mislabelled silently.
         beam_terms: Beams and the rows they own; ``None`` applies no beam. An
             empty sequence is refused rather than predicting zeros.
         mask: ``(nrow, nchan)`` uint8 structural mask (padding), never flags.
@@ -673,16 +674,20 @@ def model_to_apparent_vis_for_regions(
         One ``(nrow, nchan, len(corr_types))`` complex array per region.
 
     Raises:
-        ValueError: On a Stokes plane the model lacks, inconsistent beam terms,
-            or anything the composed primitives refuse.
+        ValueError: On a Stokes plane the model lacks, beam terms without
+            ``stokes_out``, inconsistent beam terms, or anything the composed
+            primitives refuse.
     """
     model_ds = upgrade(model_ds)
     geom = model_geometry(model_ds)
     model_stokes = list(geom["stokes"])
-    stokes_out = list(stokes_out) if stokes_out is not None else model_stokes
     if beam_terms is not None:
         if not beam_terms:
             raise ValueError("beam_terms is empty, which would predict zeros; pass None for no beam")
+        if stokes_out is None:
+            raise ValueError("stokes_out is required with beam_terms: it names the Mueller's output planes")
+    stokes_out = list(stokes_out) if stokes_out is not None else model_stokes
+    if beam_terms is not None:
         _check_beam_terms(beam_terms, uvw.shape[0], len(stokes_out), len(model_stokes))
 
     image = render_model_region(model_ds, time=time, freq_out=freq_out)
