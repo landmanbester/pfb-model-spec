@@ -1118,3 +1118,236 @@ def test_render_model_slope_refuses_a_kink_within_the_step():
     ds, time, _, bounds = _hist_mds()
     with pytest.raises(ValueError, match="kink"):
         render_model_slope(ds, time=time[0], freq_out=bounds[1, 0] - 1.0e2, step=1.0e3)
+
+
+def _per_channel(ds, uvw, chan, corr, time, beam_at=None, **kw):
+    """Exact reference: one flat prediction per channel at that channel's frequency.
+
+    `beam_at(nu)` returns the beam terms at `nu`, or is None for no beam.
+    """
+    return np.concatenate(
+        [
+            model_to_apparent_vis_for_regions(
+                ds,
+                uvw=uvw,
+                freq=chan[c : c + 1],
+                corr_types=corr,
+                time=time,
+                freq_out=chan[c],
+                beam_terms=None if beam_at is None else beam_at(chan[c]),
+                **kw,
+            )[0]
+            for c in range(chan.size)
+        ],
+        axis=1,
+    )
+
+
+def _inside(bounds, b, n=7):
+    """`n` channels strictly inside band `b`."""
+    return np.linspace(bounds[b, 0], bounds[b, 1], n + 2)[1:-1]
+
+
+def _assert_rel(got, ref, rtol=1e-8):
+    assert_allclose(got, ref, rtol=0, atol=rtol * np.abs(ref).max())
+
+
+_CORR = ("XX", "YY")
+
+
+def test_linear_matches_per_channel_inside_a_tent_piece():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(40), nrow=300)
+    chan = _inside(bounds, 1)
+    kw = dict(uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], epsilon=1e-10)
+    (got,) = model_to_apparent_vis_for_regions(ds, freq_out=chan.mean(), spectral="linear", **kw)
+    (flat,) = model_to_apparent_vis_for_regions(ds, freq_out=chan.mean(), **kw)
+    ref = _per_channel(ds, uvw, chan, _CORR, time[0], epsilon=1e-10)
+    _assert_rel(got, ref)
+    assert np.abs(flat - ref).max() > 1e-4 * np.abs(ref).max()  # flat really is wrong here
+
+
+def test_linear_does_not_depend_on_the_expansion_point_inside_a_piece():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(41), nrow=300)
+    chan = _inside(bounds, 1)
+    width = bounds[1, 1] - bounds[1, 0]
+    kw = dict(uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], epsilon=1e-10, spectral="linear")
+    (ref,) = model_to_apparent_vis_for_regions(ds, freq_out=chan.mean(), **kw)
+    # the last is outside the channel span but inside the piece
+    for nu0 in (freq[1], bounds[1, 0] + 0.05 * width):
+        (got,) = model_to_apparent_vis_for_regions(ds, freq_out=nu0, **kw)
+        _assert_rel(got, ref)
+
+
+def test_linear_equals_flat_for_a_box_model():
+    ds, time, freq, bounds = _hist_mds(method="box")
+    uvw, _ = _uvw_freq(np.random.default_rng(42), nrow=300)
+    kw = dict(uvw=uvw, freq=_inside(bounds, 1), corr_types=_CORR, time=time[0], freq_out=freq[1])
+    (lin,) = model_to_apparent_vis_for_regions(ds, spectral="linear", **kw)
+    (flat,) = model_to_apparent_vis_for_regions(ds, **kw)
+    assert_array_equal(lin, flat)
+
+
+def test_linear_error_is_second_order_for_a_polynomial_basis():
+    ds, _, time, freq, _ = _synthetic_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(43), nrow=300)
+    nu0 = 0.5 * (freq[1] + freq[2])
+
+    def errors(width):
+        chan = np.linspace(nu0 - width / 2, nu0 + width / 2, 5)
+        kw = dict(uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], freq_out=nu0, epsilon=1e-12)
+        ref = _per_channel(ds, uvw, chan, _CORR, time[0], epsilon=1e-12)
+        lin = model_to_apparent_vis_for_regions(ds, spectral="linear", **kw)[0]
+        flat = model_to_apparent_vis_for_regions(ds, **kw)[0]
+        return np.abs(lin - ref).max(), np.abs(flat - ref).max()
+
+    lin_w, flat_w = errors(40.0e6)
+    lin_h, flat_h = errors(20.0e6)
+    assert 3.0 < lin_w / lin_h < 5.0
+    assert 1.5 < flat_w / flat_h < 2.5
+    assert lin_w < 0.1 * flat_w
+
+
+def test_linear_refuses_a_chunk_that_straddles_a_kink():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(44), nrow=50)
+    with pytest.raises(ValueError, match="kink"):
+        model_to_apparent_vis_for_regions(
+            ds,
+            uvw=uvw,
+            freq=np.linspace(freq[1], freq[2], 4),
+            corr_types=_CORR,
+            time=time[0],
+            freq_out=freq[1],
+            spectral="linear",
+        )
+
+
+def test_linear_beyond_the_outer_kink_matches_per_channel():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(45), nrow=300)
+    w = bounds[-1, 1] - bounds[-1, 0]
+    chan = np.linspace(bounds[-1, 1] + 0.1 * w, bounds[-1, 1] + 0.5 * w, 5)  # wholly held flat
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], freq_out=chan.mean(), spectral="linear", epsilon=1e-10
+    )
+    _assert_rel(got, _per_channel(ds, uvw, chan, _CORR, time[0], epsilon=1e-10))
+
+
+def test_linear_refuses_a_chunk_that_straddles_the_outer_kink():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(46), nrow=50)
+    w = bounds[-1, 1] - bounds[-1, 0]
+    chan = np.linspace(bounds[-1, 1] - 0.2 * w, bounds[-1, 1] + 0.2 * w, 5)
+    with pytest.raises(ValueError, match="kink"):
+        model_to_apparent_vis_for_regions(
+            ds, uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], freq_out=chan[0], spectral="linear"
+        )
+
+
+def test_linear_around_a_dropped_band():
+    ds, time, freq, bounds = _hist_mds(drop=(2,))
+    uvw, _ = _uvw_freq(np.random.default_rng(47), nrow=300)
+    gap_break = 0.5 * (bounds[1, 1] + bounds[3, 0])
+    kw = dict(uvw=uvw, corr_types=_CORR, time=time[0], spectral="linear", epsilon=1e-10)
+    held = np.linspace(bounds[1, 1], gap_break, 7)[1:-1]  # band 1's piece, past its clamp
+    (got,) = model_to_apparent_vis_for_regions(ds, freq=held, freq_out=held.mean(), **kw)
+    _assert_rel(got, _per_channel(ds, uvw, held, _CORR, time[0], epsilon=1e-10))
+    w = bounds[1, 1] - bounds[1, 0]
+    crossing = np.linspace(bounds[1, 1] - 0.2 * w, bounds[1, 1] + 0.2 * w, 5)
+    with pytest.raises(ValueError, match="kink"):
+        model_to_apparent_vis_for_regions(ds, freq=crossing, freq_out=crossing[0], **kw)
+
+
+def test_linear_channel_on_a_break_belongs_to_the_upper_piece():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(48), nrow=300)
+    brk = bounds[2, 0]
+    kw = dict(uvw=uvw, corr_types=_CORR, time=time[0], spectral="linear", epsilon=1e-10)
+    up = np.r_[brk, np.linspace(brk, bounds[2, 1], 6)[1:-1]]
+    (got,) = model_to_apparent_vis_for_regions(ds, freq=up, freq_out=up.mean(), **kw)
+    _assert_rel(got, _per_channel(ds, uvw, up, _CORR, time[0], epsilon=1e-10))
+    down = np.r_[np.linspace(bounds[1, 0], brk, 6)[1:-1], brk]
+    with pytest.raises(ValueError, match="kink"):
+        model_to_apparent_vis_for_regions(ds, freq=down, freq_out=down[:-1].mean(), **kw)
+
+
+def test_linear_rejects_an_unknown_spectral_mode():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(49), nrow=50)
+    with pytest.raises(ValueError, match="spectral"):
+        model_to_apparent_vis_for_regions(
+            ds, uvw=uvw, freq=freq, corr_types=_CORR, time=time[0], freq_out=freq[0], spectral="cubic"
+        )
+
+
+def test_linear_single_channel_chunk_matches_per_channel():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(50), nrow=300)
+    chan = freq[1:2] + 1.0e6
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], freq_out=freq[1], spectral="linear"
+    )
+    _assert_rel(got, _per_channel(ds, uvw, chan, _CORR, time[0]))
+
+
+def test_linear_masked_rows_are_zero():
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(51), nrow=300)
+    chan = _inside(bounds, 1)
+    padded = uvw.copy()
+    padded[:10] = np.nan
+    mask = np.ones((uvw.shape[0], chan.size), dtype=np.uint8)
+    mask[:10] = 0
+    kw = dict(freq=chan, corr_types=_CORR, time=time[0], freq_out=chan.mean(), spectral="linear")
+    (got,) = model_to_apparent_vis_for_regions(ds, uvw=padded, mask=mask, **kw)
+    (clean,) = model_to_apparent_vis_for_regions(ds, uvw=uvw, **kw)
+    assert not got[:10].any()
+    assert_allclose(got[10:], clean[10:])
+
+
+def test_linear_on_a_genesis_model():
+    """A genesis .mds is linear in frequency and has no kinks, so linear mode is exact."""
+    ds = genesis_dataset()
+    uvw, _ = _uvw_freq(np.random.default_rng(52), nrow=300)
+    chan = np.linspace(FREQS[1] - 20.0e6, FREQS[1] + 20.0e6, 5)
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, corr_types=("XX",), time=0.0, freq_out=FREQS[1], spectral="linear", epsilon=1e-10
+    )
+    _assert_rel(got, _per_channel(ds, uvw, chan, ("XX",), 0.0, epsilon=1e-10))
+
+
+def test_linear_stokes_subset():
+    ds, time, freq, bounds = _hist_mds(stokes=("I", "Q"))
+    uvw, _ = _uvw_freq(np.random.default_rng(53), nrow=300)
+    kw = dict(
+        uvw=uvw, freq=_inside(bounds, 1), corr_types=("XX", "YY"), time=time[0], freq_out=freq[1], spectral="linear"
+    )
+    (q_only,) = model_to_apparent_vis_for_regions(ds, stokes_out=["Q"], **kw)
+    (iq,) = model_to_apparent_vis_for_regions(ds, **kw)
+    (i_only,) = model_to_apparent_vis_for_regions(ds, stokes_out=["I"], **kw)
+    _assert_rel(q_only + i_only, iq, rtol=1e-12)
+    _assert_rel(q_only[..., 0], -q_only[..., 1], rtol=1e-12)  # Q enters XX and YY with opposite signs
+
+
+def test_linear_regions_add_up_to_the_whole():
+    ds, time, freq, bounds = _hist_mds()
+    geom = model_geometry(ds)
+    uvw, _ = _uvw_freq(np.random.default_rng(54), nrow=300)
+    left = np.zeros((geom["ny"], geom["nx"]))
+    left[:, : geom["nx"] // 2] = 1.0
+    regions = [crop_bbox(left), crop_bbox(1.0 - left)]
+    kw = dict(
+        uvw=uvw,
+        freq=_inside(bounds, 1),
+        corr_types=_CORR,
+        time=time[0],
+        freq_out=freq[1],
+        epsilon=1e-10,
+        spectral="linear",
+    )
+    parts = model_to_apparent_vis_for_regions(ds, region_masks=regions, **kw)
+    (whole,) = model_to_apparent_vis_for_regions(ds, **kw)
+    assert all(np.abs(p).max() > 1e-3 * np.abs(whole).max() for p in parts)
+    _assert_rel(parts[0] + parts[1], whole)

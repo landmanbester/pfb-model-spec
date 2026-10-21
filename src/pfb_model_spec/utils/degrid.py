@@ -502,6 +502,8 @@ def render_model_region(
     )
 
 
+SPECTRAL = ("flat", "linear")
+
 _F = sm.Symbol("f")
 # a clamp solved by sympy can land a few ULP off the break it coincides with
 _KINK_MERGE_HZ = 1.0
@@ -844,6 +846,7 @@ def model_to_apparent_vis_for_regions(
     do_wgridding: bool = True,
     divide_by_n: bool = False,
     nthreads: int = 1,
+    spectral: str = "flat",
 ) -> list[np.ndarray]:
     """Render a model once and degrid each region, optionally through beams.
 
@@ -860,6 +863,19 @@ def model_to_apparent_vis_for_regions(
     Each term costs a full gridding pass per output plane (two for a complex
     block), whatever the share of rows it owns, so splitting rows between K
     beams costs about K times the FFT work of a single beam.
+
+    ``spectral="linear"`` predicts the model linear in frequency across the
+    chunk instead of flat at ``freq_out``: it also renders the slope
+    (:func:`render_model_slope`), degrids both images and combines them per
+    channel as ``V0 + (freq - freq_out) * V1``. This is exact where the model
+    is linear over the chunk, so the chunk (with ``freq_out`` and the
+    difference step) must lie between two consecutive
+    :func:`frequency_kinks`; cut the frequency axis with
+    :func:`split_at_kinks` first. Inside a tent piece the result does not
+    depend on ``freq_out``; for the polynomial bases the chunk mean minimises
+    the second-order error. Linear mode doubles every gridding pass and keeps
+    one extra full image resident, except that an empty slope image (a box
+    model without a beam slope) is skipped by :func:`degrid_stokes`.
 
     Args:
         model_ds: An opened `.mds` dataset.
@@ -880,15 +896,20 @@ def model_to_apparent_vis_for_regions(
         do_wgridding: w-correction via improved w-stacking.
         divide_by_n: Divide by the geometric n-term in ducc.
         nthreads: Gridder threads.
+        spectral: One of ``SPECTRAL``: ``"flat"`` holds the model at
+            ``freq_out`` across the chunk; ``"linear"`` adds its slope.
 
     Returns:
         One ``(nrow, nchan, len(corr_types))`` complex array per region.
 
     Raises:
         ValueError: On a Stokes plane the model lacks, beam terms without
-            ``stokes_out``, inconsistent beam terms, or anything the composed
-            primitives refuse.
+            ``stokes_out``, inconsistent beam terms, an unknown ``spectral``,
+            a linear chunk that straddles a frequency kink, or anything the
+            composed primitives refuse.
     """
+    if spectral not in SPECTRAL:
+        raise ValueError(f"spectral must be one of {SPECTRAL}, got {spectral!r}")
     model_ds = upgrade(model_ds)
     geom = model_geometry(model_ds)
     model_stokes = list(geom["stokes"])
@@ -902,6 +923,20 @@ def model_to_apparent_vis_for_regions(
         _check_beam_terms(beam_terms, uvw.shape[0], len(stokes_out), len(model_stokes))
 
     image = render_model_region(model_ds, time=time, freq_out=freq_out)
+    slope = dnu = None
+    if spectral == "linear":
+        if beam_terms is not None:
+            raise NotImplementedError("spectral='linear' with beam_terms")
+        step = 1e-6 * freq_out
+        kinks = frequency_kinks(model_ds)
+        labels = np.searchsorted(kinks, np.r_[freq, freq_out, freq_out + step], side="right")
+        if np.any(labels != labels[0]):
+            raise ValueError(
+                f"the chunk [{np.min(freq)}, {np.max(freq)}] Hz with freq_out={freq_out} straddles a frequency "
+                "kink; cut it with split_at_kinks(freq, frequency_kinks(model_ds))"
+            )
+        slope = render_model_slope(model_ds, time=time, freq_out=freq_out, step=step, value=image)
+        dnu = np.asarray(freq, dtype=float) - freq_out
     if beam_terms is None:
         missing = [s for s in stokes_out if s not in model_stokes]
         if missing:
@@ -910,17 +945,19 @@ def model_to_apparent_vis_for_regions(
         if planes != list(range(len(model_stokes))):
             # fancy indexing copies the whole grid, so only when not the identity
             image = image[planes]
+            slope = None if slope is None else slope[planes]
 
     out = []
     # None is the whole grid: no crop, and no full-grid mask of ones to multiply by
     for rm in [None] if region_masks is None else region_masks:
         if rm is None:
-            i0, j0, sub = 0, 0, image
+            i0, j0, sub, sub1 = 0, 0, image, slope
             x0c, y0c = geom["x0"], geom["y0"]
         else:
             i0, j0 = rm.i0, rm.j0
             nyc, nxc = rm.mask.shape
             sub = image[:, i0 : i0 + nyc, j0 : j0 + nxc] * rm.mask[None]
+            sub1 = None if slope is None else slope[:, i0 : i0 + nyc, j0 : j0 + nxc] * rm.mask[None]
             x0c, y0c = crop_phase_centre(
                 x0=geom["x0"],
                 y0=geom["y0"],
@@ -945,6 +982,8 @@ def model_to_apparent_vis_for_regions(
         )
         if beam_terms is None:
             stokes_vis = degrid_stokes(uvw, freq, np.ascontiguousarray(sub), mask=mask, **kw)
+            if sub1 is not None:
+                stokes_vis += dnu[None, None, :] * degrid_stokes(uvw, freq, np.ascontiguousarray(sub1), mask=mask, **kw)
         else:
             l, m = pixel_lm(geom, i0=i0, j0=j0, shape=sub.shape[1:])  # noqa: E741
             stokes_vis = np.zeros((len(stokes_out), uvw.shape[0], freq.size), dtype=np.complex128)
