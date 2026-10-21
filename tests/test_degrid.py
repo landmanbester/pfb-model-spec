@@ -1471,3 +1471,16 @@ def test_dmueller_must_match_the_mueller_shape():
             beam_terms=[BeamTerm(block, la, ma, dmueller=block[..., :-1])],
             spectral="linear",
         )
+
+
+def test_linear_float32_freq_out_matches_float64():
+    """A float32 freq_out must not shrink the difference step below its precision."""
+    ds, time, freq, bounds = _hist_mds()
+    uvw, _ = _uvw_freq(np.random.default_rng(70), nrow=300)
+    chan = _inside(bounds, 1)
+    kw = dict(uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], epsilon=1e-10, spectral="linear")
+    (want,) = model_to_apparent_vis_for_regions(ds, freq_out=float(np.float32(chan.mean())), **kw)
+    (got,) = model_to_apparent_vis_for_regions(ds, freq_out=np.float32(chan.mean()), **kw)
+    _assert_rel(got, want)
+    slope64 = render_model_slope(ds, time=time[0], freq_out=float(np.float32(freq[1])))
+    assert_allclose(render_model_slope(ds, time=time[0], freq_out=np.float32(freq[1])), slope64, rtol=1e-6)

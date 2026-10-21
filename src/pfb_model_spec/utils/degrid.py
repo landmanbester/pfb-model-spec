@@ -698,6 +698,7 @@ def render_model_slope(
         ValueError: If ``step`` is not positive, or a kink (:func:`frequency_kinks`)
             lies in ``(freq_out, freq_out + step]``.
     """
+    freq_out = float(freq_out)  # a float32 freq_out would round the step to its 64 Hz spacing
     step = 1e-6 * freq_out if step is None else float(step)
     if not step > 0:
         raise ValueError(f"step must be positive, got {step}")
@@ -942,6 +943,8 @@ def model_to_apparent_vis_for_regions(
     """
     if spectral not in SPECTRAL:
         raise ValueError(f"spectral must be one of {SPECTRAL}, got {spectral!r}")
+    # a float32 freq_out would render, and round the slope's step, at float32 precision (64 Hz near 1 GHz)
+    freq_out = float(freq_out)
     model_ds = upgrade(model_ds)
     geom = model_geometry(model_ds)
     model_stokes = list(geom["stokes"])
