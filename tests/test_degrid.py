@@ -2,19 +2,25 @@
 
 import numpy as np
 import pytest
+import sympy as sm
 from ducc0.wgridder.experimental import dirty2vis
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
+from sympy.parsing.sympy_parser import parse_expr
 
 from pfb_model_spec.utils.degrid import (
     BeamTerm,
     apply_mueller,
     crop_bbox,
     degrid_stokes,
+    frequency_kinks,
+    frequency_pieces,
     interp_mueller,
     model_geometry,
     model_to_apparent_vis_for_regions,
     pixel_lm,
     render_model_region,
+    render_model_slope,
+    split_at_kinks,
     stokes_vis_to_corr,
 )
 from pfb_model_spec.utils.io import build_mds_dataset
@@ -957,3 +963,158 @@ def test_regions_complex_beam_matches_the_composition():
     full = interp_mueller(block, la, ma, *pixel_lm(geom))
     ref = _composed(ds, uvw, chan, corr, time[0], freq[0], mueller=full, stokes="IQUV", epsilon=1e-10)
     assert_allclose(got, ref, rtol=0, atol=1e-8 * np.abs(ref).max())
+
+
+def _hist_mds(method="tent", nband=4, nx=64, ny=48, drop=(), stokes=("I",)):
+    """The _synthetic_mds sources, fitted by histopolation over contiguous bands.
+
+    The anchors sit off the band midpoints, like pfb-imaging's weighted freq_out.
+    Bands in `drop` get zero weight. With stokes=("I", "Q"), Q = -0.3 * I.
+    """
+    edges = np.linspace(1.0e9, 1.2e9, nband + 1)
+    bounds = np.stack([edges[:-1], edges[1:]], axis=1)
+    freq = bounds.mean(axis=1) + 0.1 * np.diff(edges)
+    time = np.array([0.0])
+    cell = np.deg2rad(2.0 / 3600.0)
+    nstokes = len(stokes)
+    cube = np.zeros((nband, nstokes, ny, nx))
+    cube[:, 0, 31, 20] = (freq / freq[0]) ** -0.7
+    cube[:, 0, 12, 44] = 2.0 * (freq / freq[0]) ** -1.1
+    if nstokes > 1:
+        cube[:, 1] = -0.3 * cube[:, 0]
+    wgt = np.ones((1, nband, nstokes))
+    wgt[0, list(drop)] = 0.0
+    coeffs, yi, xi, expr, params, texpr, fexpr = fit_image_cube(
+        time, freq, cube[None], wgt=wgt, method=method, freq_bounds=bounds
+    )
+    ds = build_mds_dataset(
+        coeffs,
+        yi,
+        xi,
+        expr,
+        params,
+        texpr,
+        fexpr,
+        time,
+        freq,
+        cell,
+        nx,
+        ny,
+        0.0,
+        0.0,
+        False,
+        True,
+        False,
+        (0.1, -0.5),
+        list(stokes),
+        "test",
+        freq_bounds=bounds,
+        weights=wgt[0].T[:, None, :],
+    )
+    return ds, time, freq, bounds
+
+
+def test_frequency_kinks_of_contiguous_bands_are_the_band_edges():
+    ds, _, _, bounds = _hist_mds()
+    assert_allclose(frequency_kinks(ds), np.r_[bounds[:, 0], bounds[-1, 1]])
+    assert frequency_kinks(_synthetic_mds()[0]).size == 0
+
+
+def test_frequency_kinks_see_the_clamps_around_a_dropped_band():
+    ds, _, _, bounds = _hist_mds(drop=(2,))
+    gap_break = 0.5 * (bounds[1, 1] + bounds[3, 0])
+    expected = np.r_[bounds[:2, 0], bounds[1, 1], gap_break, bounds[3, 0], bounds[3, 1]]
+    assert_allclose(frequency_kinks(ds), np.unique(expected))
+
+
+def test_frequency_kinks_keep_the_exact_break_value():
+    """A clamp a few ULP off a break must not displace the break itself."""
+    ds, _, _, bounds = _hist_mds()
+    kinks = frequency_kinks(ds)
+    for brk in bounds[1:, 0]:
+        assert brk in kinks
+
+
+def test_split_at_kinks_cuts_between_kinks():
+    freq = np.arange(10.0)
+    assert split_at_kinks(freq, np.array([2.5, 6.5])) == [slice(0, 3), slice(3, 7), slice(7, 10)]
+    assert split_at_kinks(freq, np.array([-1.0, 20.0])) == [slice(0, 10)]
+    assert split_at_kinks(freq, np.array([3.0])) == [slice(0, 3), slice(3, 10)]  # on a kink -> upper
+
+
+@pytest.mark.parametrize("method", ["tent", "box"])
+def test_frequency_pieces_anchor_each_surviving_band(method):
+    ds, _, freq, bounds = _hist_mds(method=method)
+    pieces = frequency_pieces(ds)
+    assert [p.anchor for p in pieces] == pytest.approx(list(freq))
+    assert pieces[0].lo == -np.inf and pieces[-1].hi == np.inf
+    assert [p.lo for p in pieces[1:]] == pytest.approx(list(bounds[1:, 0]))
+
+
+@pytest.mark.parametrize("method", ["tent", "box"])
+def test_frequency_pieces_skip_a_dropped_band(method):
+    ds, _, freq, bounds = _hist_mds(method=method, drop=(2,))
+    pieces = frequency_pieces(ds)
+    assert [p.anchor for p in pieces] == pytest.approx([freq[0], freq[1], freq[3]])
+    assert pieces[2].lo == pytest.approx(0.5 * (bounds[1, 1] + bounds[3, 0]))
+
+
+def test_frequency_pieces_refuse_an_ambiguous_box_anchor():
+    ds, *_ = _hist_mds(method="box", drop=(2,))
+    with pytest.raises(ValueError, match="ambiguous"):
+        frequency_pieces(ds.drop_vars("weights"))
+
+
+def test_frequency_pieces_of_a_polynomial_basis_are_empty():
+    assert frequency_pieces(_synthetic_mds()[0]) == []
+
+
+def test_render_model_slope_of_a_tent_is_its_piece_slope():
+    ds, time, freq, bounds = _hist_mds()
+    h = 1.0e3
+    for b in range(freq.size):
+        nu = freq[b] + 0.2 * (bounds[b, 1] - freq[b])  # inside the piece, off the anchor
+        got = render_model_slope(ds, time=time[0], freq_out=nu)
+        fd = (
+            render_model_region(ds, time=time[0], freq_out=freq[b] + h)
+            - render_model_region(ds, time=time[0], freq_out=freq[b] - h)
+        ) / (2 * h)
+        assert_allclose(got, fd, rtol=1e-6, atol=1e-18)  # one slope per piece
+
+
+def test_render_model_slope_reuses_a_supplied_value():
+    ds, time, freq, _ = _hist_mds()
+    value = render_model_region(ds, time=time[0], freq_out=freq[1])
+    assert_array_equal(
+        render_model_slope(ds, time=time[0], freq_out=freq[1], value=value),
+        render_model_slope(ds, time=time[0], freq_out=freq[1]),
+    )
+
+
+def test_render_model_slope_of_a_box_is_zero():
+    ds, time, freq, _ = _hist_mds(method="box")
+    assert not render_model_slope(ds, time=time[0], freq_out=freq[1]).any()
+
+
+def test_render_model_slope_matches_the_symbolic_derivative():
+    """For a polynomial basis the forward difference agrees with sm.diff."""
+    ds, _, time, freq, _ = _synthetic_mds()
+    a = ds.attrs
+    nu = 0.5 * (freq[1] + freq[2])
+    t, f = sm.symbols("t f")
+    params = sm.symbols(tuple(str(p) for p in ds.params.values))
+    dexpr = sm.lambdify((t, f, *params), sm.diff(parse_expr(a["parametrisation"]), f))
+    fexpr = parse_expr(a["fexpr"])
+    dfdnu = float(sm.diff(fexpr, f).subs(f, nu))
+    tval = float(parse_expr(a["texpr"]).subs(t, time[0]))
+    fval = float(fexpr.subs(f, nu))
+    yi, xi = ds.location_y.values, ds.location_x.values
+    oracle = dexpr(tval, fval, *ds.coefficients.values[0]) * dfdnu
+    got = render_model_slope(ds, time=time[0], freq_out=nu)
+    assert_allclose(got[0, yi, xi], oracle, rtol=1e-5)
+
+
+def test_render_model_slope_refuses_a_kink_within_the_step():
+    ds, time, _, bounds = _hist_mds()
+    with pytest.raises(ValueError, match="kink"):
+        render_model_slope(ds, time=time[0], freq_out=bounds[1, 0] - 1.0e2, step=1.0e3)

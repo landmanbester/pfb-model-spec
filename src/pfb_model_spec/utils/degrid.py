@@ -15,8 +15,10 @@ from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 import numpy as np
+import sympy as sm
 import xarray as xr
 from ducc0.wgridder.experimental import dirty2vis
+from sympy.parsing.sympy_parser import parse_expr
 
 from pfb_model_spec.utils.modelspec import eval_coeffs_to_slice
 from pfb_model_spec.utils.spec import upgrade
@@ -498,6 +500,215 @@ def render_model_region(
         y0o=y0o,
         kernel=kernel,
     )
+
+
+_F = sm.Symbol("f")
+# a clamp solved by sympy can land a few ULP off the break it coincides with
+_KINK_MERGE_HZ = 1.0
+
+
+def _parametrisation(ds: xr.Dataset) -> sm.Expr:
+    """The stored parametrisation, refusing a piecewise one in a mapped frequency."""
+    expr = parse_expr(ds.attrs["parametrisation"])
+    if (expr.has(sm.Piecewise) or expr.atoms(sm.Min, sm.Max)) and str(ds.attrs["fexpr"]).strip() != "f":
+        raise ValueError(f"a piecewise parametrisation needs fexpr 'f', got {ds.attrs['fexpr']!r}")
+    return expr
+
+
+def _piecewise_breaks(expr: sm.Expr) -> list[float]:
+    """The ``f < brk`` conditions of a top-level ``Piecewise``, in order."""
+    if not isinstance(expr, sm.Piecewise):
+        return []
+    breaks = []
+    for _, cond in expr.args:
+        if cond is sm.true:
+            continue
+        if not (isinstance(cond, sm.StrictLessThan) and cond.lhs == _F):
+            raise NotImplementedError(f"unsupported piece condition {cond}")
+        breaks.append(float(cond.rhs))
+    return breaks
+
+
+def _clamp_core(node: sm.Expr) -> sm.Expr:
+    """The expression, linear in ``f``, that a nest of ``Min``/``Max`` clamps acts on."""
+    core = node
+    while isinstance(core, (sm.Min, sm.Max)):
+        dependent = [arg for arg in core.args if arg.has(_F)]
+        if len(dependent) != 1:
+            raise NotImplementedError(f"unsupported clamp {node}")
+        core = dependent[0]
+    if sm.diff(core, _F, 2) != 0:
+        raise NotImplementedError(f"clamp core {core} is not linear in f")
+    return core
+
+
+def _root(core: sm.Expr, value: sm.Expr) -> float:
+    """Where the linear ``core`` equals ``value``."""
+    slope = sm.diff(core, _F)
+    return float((value - core.subs(_F, 0)) / slope)
+
+
+def frequency_kinks(model_ds: xr.Dataset) -> np.ndarray:
+    """Every frequency at which the model's spectrum switches piece or clamps.
+
+    A kink is a ``Piecewise`` break (where the histopolations may jump) or a
+    ``Min``/``Max`` switch point (where a tent piece is held at its band edge,
+    which also happens around a band dropped from the fit). Between two
+    consecutive kinks the model is linear in frequency, so a degrid chunk
+    predicted with ``spectral="linear"`` must not straddle one.
+
+    Intervals are half-open, ``[k_i, k_{i+1})``, as in the ``Piecewise``
+    conditions ``f < brk``: a frequency exactly on a break belongs to the
+    upper piece. Label with ``np.searchsorted(kinks, x, side="right")``, or
+    cut with :func:`split_at_kinks`.
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+
+    Returns:
+        Sorted kink frequencies in Hz; empty for the polynomial bases.
+
+    Raises:
+        ValueError: If a piecewise parametrisation has a non-identity ``fexpr``.
+        NotImplementedError: For a piece condition or clamp of an unknown shape.
+    """
+    expr = _parametrisation(upgrade(model_ds))
+    kinks = _piecewise_breaks(expr)
+    clamps = []
+    for node in expr.atoms(sm.Min, sm.Max):
+        core = _clamp_core(node)
+        clamps += [_root(core, arg) for arg in node.args if not arg.has(_F)]
+    # breaks first, so a clamp that coincides with one keeps the break's exact value
+    for clamp in sorted(clamps):
+        if all(abs(clamp - k) >= _KINK_MERGE_HZ for k in kinks):
+            kinks.append(clamp)
+    return np.array(sorted(kinks), dtype=float)
+
+
+def split_at_kinks(freq: np.ndarray, kinks: np.ndarray) -> list[slice]:
+    """Cut an ascending frequency axis into runs that each lie between two kinks.
+
+    Args:
+        freq: ``(nchan,)`` ascending, Hz.
+        kinks: Kink frequencies from :func:`frequency_kinks`.
+
+    Returns:
+        Contiguous slices of ``freq``, in order, covering it; a channel exactly
+        on a kink starts the upper run.
+    """
+    labels = np.searchsorted(kinks, freq, side="right")
+    cuts = [0, *(np.flatnonzero(np.diff(labels)) + 1).tolist(), len(freq)]
+    return [slice(lo, hi) for lo, hi in zip(cuts[:-1], cuts[1:])]
+
+
+class FrequencyPiece(NamedTuple):
+    """One piece of a histopolated spectrum and the frequency it is pinned at.
+
+    Attributes:
+        lo: Lower break in Hz, inclusive; ``-inf`` for the first piece.
+        hi: Upper break in Hz, exclusive; ``inf`` for the last piece.
+        anchor: The band's weighted frequency, where rendering returns the
+            band value exactly.
+    """
+
+    lo: float
+    hi: float
+    anchor: float
+
+
+def frequency_pieces(model_ds: xr.Dataset) -> list[FrequencyPiece]:
+    """The pieces of a histopolated model, one per band that survived the fit.
+
+    A consumer maps a chunk to its piece here, for example to evaluate a flat
+    beam at the band's anchor. A band with zero weight in every plane is
+    dropped by the fit, so pieces do not index the ``freqs`` coord one to one.
+
+    Each tent anchor is read from its piece's expression. A box piece has
+    none in its expression, so its anchor is the one ``freqs`` value in
+    ``[lo, hi)`` among the bands the stored ``weights`` kept (all bands when
+    ``weights`` is absent).
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+
+    Returns:
+        The pieces in frequency order. A non-piecewise model fitted to a single
+        band is one piece spanning all frequencies; the polynomial bases give
+        an empty list.
+
+    Raises:
+        ValueError: If a box piece's anchor is ambiguous (a band was dropped and
+            the `.mds` records no ``weights``), or as :func:`frequency_kinks`.
+    """
+    ds = upgrade(model_ds)
+    expr = _parametrisation(ds)
+    freqs = ds.freqs.values.astype(float)
+    if "weights" in ds.variables:
+        freqs = freqs[np.any(ds.weights.values != 0, axis=(0, 1))]
+    if not isinstance(expr, sm.Piecewise):
+        return [FrequencyPiece(-np.inf, np.inf, float(freqs[0]))] if freqs.size == 1 else []
+    edges = [-np.inf, *_piecewise_breaks(expr), np.inf]
+    pieces = []
+    for (term, _), lo, hi in zip(expr.args, edges[:-1], edges[1:]):
+        clamps = term.atoms(sm.Min, sm.Max)
+        if clamps:
+            anchor = _root(_clamp_core(next(iter(clamps))), sm.Integer(0))
+        else:
+            inside = freqs[(freqs >= lo) & (freqs < hi)]
+            if inside.size != 1:
+                raise ValueError(
+                    f"ambiguous anchor for the piece [{lo}, {hi}): {inside.size} candidate frequencies; "
+                    "the .mds needs weights to tell which bands the fit kept"
+                )
+            anchor = float(inside[0])
+        pieces.append(FrequencyPiece(float(lo), float(hi), anchor))
+    return pieces
+
+
+def render_model_slope(
+    model_ds: xr.Dataset,
+    *,
+    time: float,
+    freq_out: float,
+    step: float | None = None,
+    value: np.ndarray | None = None,
+) -> np.ndarray:
+    """Render the model's frequency derivative at one time and frequency.
+
+    A forward difference, ``(R(freq_out + step) - R(freq_out)) / step``, through
+    :func:`render_model_region`. It is exact inside a histopolation piece and
+    first order in ``step`` for the polynomial bases (relative error ~1e-6 at
+    the default step). Only the model's own grid is supported: the ``"tent"``
+    remap is nonlinear and does not commute with differencing.
+
+    Args:
+        model_ds: An opened `.mds` dataset.
+        time: Time to evaluate at, in the model's own time units.
+        freq_out: Frequency to evaluate at, in Hz.
+        step: Difference step in Hz; defaults to ``1e-6 * freq_out``.
+        value: The rendering at ``freq_out`` if the caller already holds it;
+            supplying it saves a render, so only one extra image is resident.
+
+    Returns:
+        The slope per Hz, shape ``(nstokes, ny, nx)``.
+
+    Raises:
+        ValueError: If ``step`` is not positive, or a kink (:func:`frequency_kinks`)
+            lies in ``(freq_out, freq_out + step]``.
+    """
+    step = 1e-6 * freq_out if step is None else float(step)
+    if not step > 0:
+        raise ValueError(f"step must be positive, got {step}")
+    kinks = frequency_kinks(model_ds)
+    below, above = np.searchsorted(kinks, [freq_out, freq_out + step], side="right")
+    if below != above:
+        raise ValueError(f"a frequency kink lies within (freq_out, freq_out + step] = ({freq_out}, {freq_out + step}]")
+    if value is None:
+        value = render_model_region(model_ds, time=time, freq_out=freq_out)
+    slope = render_model_region(model_ds, time=time, freq_out=freq_out + step)
+    slope -= value
+    slope /= step
+    return slope
 
 
 def apply_mueller(stokes_image: np.ndarray, mueller: np.ndarray) -> np.ndarray:
