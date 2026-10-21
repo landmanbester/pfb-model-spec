@@ -111,6 +111,19 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   `(nstokes, ny, nx)`. Wraps `eval_coeffs_to_slice`; the output grid defaults to the model's
   own. `freq_out` may lie between fitted bands — that continuity is what lets a consumer predict
   at finer spectral resolution than the imaging run used.
+- `frequency_kinks(model_ds)` → sorted Hz where the spectrum switches piece (`Piecewise` breaks,
+  where histopolations may jump) or clamps (a tent held at its band edge, also around a band
+  dropped from the fit); empty for the polynomial bases. Intervals are half-open `[k_i, k_{i+1})`,
+  like `Piecewise`'s `f < brk`: a frequency on a break belongs to the upper piece. Always label with
+  `searchsorted(..., side="right")`; `split_at_kinks(freq, kinks)` → `list[slice]` does the cutting.
+- `frequency_pieces(model_ds)` → `FrequencyPiece(lo, hi, anchor)` per piece that survived the fit
+  (dropped bands do not index `freqs` one to one). A tent anchor is read from its expression; a box
+  anchor is the one kept `freqs` value in the piece (kept per the stored `weights`), raising if
+  ambiguous. Polynomial bases give `[]`.
+- `render_model_slope(model_ds, *, time, freq_out, step=None, value=None)` → dS/dν per Hz,
+  `(nstokes, ny, nx)`: a forward difference through `render_model_region` (default step
+  `1e-6·freq_out`), exact inside a histopolation piece. Pass `value` (the rendering at `freq_out`)
+  to save a render. Model grid only — the tent remap does not commute with differencing.
 - `apply_mueller(stokes_image, mueller)` → `(nstokes_out, ny, nx)`. Pixelwise
   `apparent[i] = Σ_j mueller[i,j]·intrinsic[j]`. Never builds a beam and never folds the
   wgridder's `1/n` term; a caller that folds `1/n` into its beam must keep
@@ -132,10 +145,14 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   Mueller block onto the pixel axes (no full-resolution mesh); points outside the coarse axes are 0.
 - `crop_bbox(mask)` → `RegionMask(mask, i0, j0)` and `crop_phase_centre(…)` — region cropping and
   the shifted phase centre. They live here since #27 (moved from ratt-ru/pfb-imaging#331).
-- `BeamTerm(mueller, l_axis, m_axis, rows=None, conj_rows=None)` — one bare primary beam
+- `BeamTerm(mueller, l_axis, m_axis, rows=None, conj_rows=None, dmueller=None)` — one bare primary beam
   `(nso, nsi, nmb, nlb)`, real or complex, plus the rows it owns. `conj_rows` (a subset of
   `rows`) take `conj(mueller)`, for baseline orderings reversed relative to the beam's. The
-  caller builds the beam; this package never depends on a beam library.
+  caller builds the beam; this package never depends on a beam library. `dmueller` (same shape,
+  per Hz, `spectral="linear"` only) is the slope of any linear fit to the beam (chord, least
+  squares, λ/D) through `mueller` at `freq_out`: model, beam and offsets share one expansion
+  point. With `dmueller=None` the beam is flat; evaluate it at the piece anchor
+  (`frequency_pieces`), where the imaging beam was, not at the chunk mean.
 - `model_to_apparent_vis_for_regions(…, region_masks, beam_terms, stokes_out, divide_by_n=False)`
   → one `(nrow, nchan, ncorr)` array per region; the only fused per-chunk wrapper (the
   single-region `model_to_apparent_vis_for_region` was folded into it). Renders the model once,
@@ -146,6 +163,14 @@ distribution and the MS write belong to the calling application (pfb-imaging's
   a full gridding pass per plane, so K row groups cost about K× the FFT work. **`divide_by_n`
   defaults to `False` and passes straight through: a caller with a bare beam must pass `True`**
   so ducc folds in `1/n`; only a beam that already contains `1/n` keeps `False`.
+  `spectral="linear"` (#39; default `"flat"`) degrids the value and slope images and returns
+  `V0 + (ν − freq_out)·V1` per channel, with `M0·S1 + M1·S0` as the apparent slope (the
+  `(ν−ν₀)²M1·S1` term is dropped). The chunk, `freq_out` and `freq_out + step` must lie between
+  two consecutive kinks, or it raises; the wrapper never splits a chunk, so consumers cut with
+  `split_at_kinks` first (fixed-width chunks drift off the imager's band edges). Inside a tent
+  piece any `freq_out` gives the same answer; the chunk mean is recommended. Every gridding pass
+  doubles and one extra full image stays resident; an empty slope image (box, no `dmueller`)
+  is skipped.
 
 **Why primitives plus one fused wrapper, not one function.** Three consumers need pieces rather than the whole:
 `--transfer-model-from` (ratt-ru/pfb-imaging#309) needs only `render_model_region`;

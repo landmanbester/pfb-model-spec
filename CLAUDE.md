@@ -28,7 +28,8 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
   migrated (dropped — daskms-coupled and no longer producible in-repo).
 - **Degrid kernel** (`utils/degrid.py`): renders a `.mds` to an image, optionally attenuates
   it with a Mueller beam, degrids to visibilities (ducc0) and converts Stokes to
-  correlations; multi-region with per-row beam terms. Pure numpy — the calling application owns chunking, distribution and I/O.
+  correlations; multi-region with per-row beam terms; optionally linear in frequency across a
+  chunk (#39). Pure numpy — the calling application owns chunking, distribution and I/O.
   Consumed by pfb-imaging's `degrid-msv4` (ratt-ru/pfb-imaging#278). See
   `.claude/rules/component-model.md` → "The degrid API".
 - **Flux-conserving remap** (`utils/remap.py`, #23): `eval_coeffs_to_slice` / `render_model_region`

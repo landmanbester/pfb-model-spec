@@ -1125,6 +1125,7 @@ def _per_channel(ds, uvw, chan, corr, time, beam_at=None, **kw):
 
     `beam_at(nu)` returns the beam terms at `nu`, or is None for no beam.
     """
+    kw.pop("corr_types", None)  # `corr` wins, so callers can share one kwargs dict
     return np.concatenate(
         [
             model_to_apparent_vis_for_regions(
@@ -1351,3 +1352,122 @@ def test_linear_regions_add_up_to_the_whole():
     (whole,) = model_to_apparent_vis_for_regions(ds, **kw)
     assert all(np.abs(p).max() > 1e-3 * np.abs(whole).max() for p in parts)
     _assert_rel(parts[0] + parts[1], whole)
+
+
+def _beam_setup(method, scale=1.0, nrow=300, seed=60):
+    """A histopolated model, a sloped beam block on its grid, and channels inside band 1."""
+    ds, time, freq, bounds = _hist_mds(method=method)
+    geom = model_geometry(ds)
+    block, la, ma = _sloped_block(geom, scale=scale)
+    uvw, _ = _uvw_freq(np.random.default_rng(seed), nrow=nrow)
+    chan = _inside(bounds, 1)
+    return ds, time, chan, uvw, block, la, ma
+
+
+def test_linear_frozen_beam_matches_per_channel_for_a_tent():
+    """dmueller=None holds the beam at freq_out; the tent's own slope is still exact."""
+    ds, time, chan, uvw, block, la, ma = _beam_setup("tent")
+    kw = dict(corr_types=_CORR, stokes_out=["I"], epsilon=1e-10, divide_by_n=True)
+    (got,) = model_to_apparent_vis_for_regions(
+        ds,
+        uvw=uvw,
+        freq=chan,
+        time=time[0],
+        freq_out=chan.mean(),
+        beam_terms=[BeamTerm(block, la, ma)],
+        spectral="linear",
+        **kw,
+    )
+    ref = _per_channel(ds, uvw, chan, _CORR, time[0], beam_at=lambda nu: [BeamTerm(block, la, ma)], **kw)
+    _assert_rel(got, ref)
+
+
+def test_linear_beam_slope_matches_per_channel():
+    """A flat (box) model under a beam linear in frequency is linear overall, so exact."""
+    ds, time, chan, uvw, block, la, ma = _beam_setup("box")
+    kappa, nu0 = 2.0e-9, chan.mean()  # fractional beam change per Hz
+    kw = dict(corr_types=_CORR, stokes_out=["I"], epsilon=1e-10)
+    term = BeamTerm(block, la, ma, dmueller=kappa * block)
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, time=time[0], freq_out=nu0, beam_terms=[term], spectral="linear", **kw
+    )
+    ref = _per_channel(
+        ds, uvw, chan, _CORR, time[0], beam_at=lambda nu: [BeamTerm(block * (1 + kappa * (nu - nu0)), la, ma)], **kw
+    )
+    _assert_rel(got, ref)
+
+
+def test_linear_box_with_a_beam_slope_is_not_flat():
+    """With a beam slope the M1·S0 pass runs even though the box model's slope is empty."""
+    ds, time, chan, uvw, block, la, ma = _beam_setup("box")
+    kw = dict(uvw=uvw, freq=chan, corr_types=_CORR, time=time[0], freq_out=chan.mean(), stokes_out=["I"])
+    (lin,) = model_to_apparent_vis_for_regions(
+        ds, beam_terms=[BeamTerm(block, la, ma, dmueller=2.0e-9 * block)], spectral="linear", **kw
+    )
+    (flat,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **kw)
+    assert np.abs(lin - flat).max() > 1e-3 * np.abs(flat).max()
+
+
+def test_linear_beam_and_model_slopes_both_enter():
+    """Tent under a sloped beam: only the dropped (nu - nu0)^2 M1·S1 term remains."""
+    ds, time, chan, uvw, block, la, ma = _beam_setup("tent")
+    kappa, nu0 = 2.0e-9, chan.mean()
+    kw = dict(corr_types=_CORR, stokes_out=["I"], epsilon=1e-10)
+    lin = dict(uvw=uvw, freq=chan, time=time[0], freq_out=nu0, spectral="linear", **kw)
+    (full,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma, dmueller=kappa * block)], **lin)
+    (frozen,) = model_to_apparent_vis_for_regions(ds, beam_terms=[BeamTerm(block, la, ma)], **lin)
+    ref = _per_channel(
+        ds, uvw, chan, _CORR, time[0], beam_at=lambda nu: [BeamTerm(block * (1 + kappa * (nu - nu0)), la, ma)], **kw
+    )
+    assert np.abs(full - ref).max() < 0.05 * np.abs(frozen - ref).max()
+
+
+def test_linear_complex_beam_slope_with_conj_rows():
+    ds, time, chan, uvw, block, la, ma = _beam_setup("box", scale=1.0 + 0.3j)
+    kappa, nu0 = 2.0e-9 * (1.0 - 0.5j), chan.mean()
+    rows = np.ones(uvw.shape[0], dtype=bool)
+    conj = np.zeros_like(rows)
+    conj[::2] = True
+    kw = dict(corr_types=_CORR, stokes_out=["I"], epsilon=1e-10)
+    term = BeamTerm(block, la, ma, rows=rows, conj_rows=conj, dmueller=kappa * block)
+    (got,) = model_to_apparent_vis_for_regions(
+        ds, uvw=uvw, freq=chan, time=time[0], freq_out=nu0, beam_terms=[term], spectral="linear", **kw
+    )
+
+    def beam_at(nu):
+        return [BeamTerm(block * (1 + kappa * (nu - nu0)), la, ma, rows=rows, conj_rows=conj)]
+
+    ref = _per_channel(ds, uvw, chan, _CORR, time[0], beam_at=beam_at, **kw)
+    assert np.abs(ref.imag).max() > 1e-3 * np.abs(ref).max()
+    _assert_rel(got, ref)
+
+
+def test_dmueller_needs_linear_mode():
+    ds, time, chan, uvw, block, la, ma = _beam_setup("box", nrow=50)
+    with pytest.raises(ValueError, match="dmueller"):
+        model_to_apparent_vis_for_regions(
+            ds,
+            uvw=uvw,
+            freq=chan,
+            corr_types=_CORR,
+            time=time[0],
+            freq_out=chan.mean(),
+            stokes_out=["I"],
+            beam_terms=[BeamTerm(block, la, ma, dmueller=block)],
+        )
+
+
+def test_dmueller_must_match_the_mueller_shape():
+    ds, time, chan, uvw, block, la, ma = _beam_setup("box", nrow=50)
+    with pytest.raises(ValueError, match="dmueller"):
+        model_to_apparent_vis_for_regions(
+            ds,
+            uvw=uvw,
+            freq=chan,
+            corr_types=_CORR,
+            time=time[0],
+            freq_out=chan.mean(),
+            stokes_out=["I"],
+            beam_terms=[BeamTerm(block, la, ma, dmueller=block[..., :-1])],
+            spectral="linear",
+        )

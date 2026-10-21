@@ -775,6 +775,17 @@ class BeamTerm(NamedTuple):
         m_axis: ``(nmb,)`` ascending, radians.
         rows: ``(nrow,)`` bool, the rows this term predicts; ``None`` means all.
         conj_rows: ``(nrow,)`` bool, a subset of ``rows`` taking the conjugate.
+        dmueller: Optional slope of the Mueller block per Hz, same shape and
+            axes as ``mueller``, for ``spectral="linear"``. It may come from
+            any linear fit to the beam over the chunk (chord, least squares or
+            the lambda/D slope ``(l dM/dl + m dM/dm) / freq_out``), but that
+            line must pass through ``mueller`` at the wrapper's ``freq_out``:
+            the model, the beam and the offsets share one expansion point, and
+            mixing two is a first-order error. ``None`` holds the beam flat;
+            then evaluate ``mueller`` at the chunk's piece anchor
+            (:func:`frequency_pieces`), the frequency the imaging beam used,
+            not at the chunk mean. ``conj_rows`` conjugate it as they do
+            ``mueller``.
     """
 
     mueller: np.ndarray
@@ -782,6 +793,7 @@ class BeamTerm(NamedTuple):
     m_axis: np.ndarray
     rows: np.ndarray | None = None
     conj_rows: np.ndarray | None = None
+    dmueller: np.ndarray | None = None
 
 
 def _check_beam_terms(terms: Sequence[BeamTerm], nrow: int, nso: int, nsi: int) -> None:
@@ -790,6 +802,8 @@ def _check_beam_terms(terms: Sequence[BeamTerm], nrow: int, nso: int, nsi: int) 
     for term in terms:
         if term.mueller.ndim != 4 or term.mueller.shape[:2] != (nso, nsi):
             raise ValueError(f"mueller must be (nso={nso}, nsi={nsi}, nm, nl), got {term.mueller.shape}")
+        if term.dmueller is not None and term.dmueller.shape != term.mueller.shape:
+            raise ValueError(f"dmueller must match the mueller's shape {term.mueller.shape}, got {term.dmueller.shape}")
         rows = np.ones(nrow, dtype=bool) if term.rows is None else np.asarray(term.rows, dtype=bool)
         if rows.shape != (nrow,):
             raise ValueError(f"rows must have shape ({nrow},), got {rows.shape}")
@@ -811,8 +825,15 @@ def _degrid_beam_term(
     m: np.ndarray,
     mask: np.ndarray | None,
     kw: dict[str, Any],
+    sub1: np.ndarray | None = None,
+    dnu: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Attenuate one region by one beam term and degrid it onto the term's rows."""
+    """Attenuate one region by one beam term and degrid it onto the term's rows.
+
+    With a slope image ``sub1``, the apparent slope ``M0·S1 + M1·S0`` is
+    degridded too and added as ``dnu`` times its visibilities; the
+    ``(freq - freq_out)^2 M1·S1`` term is dropped.
+    """
     nrow = uvw.shape[0]
     nso, nsi = term.mueller.shape[:2]
     term_mask = mask
@@ -827,6 +848,15 @@ def _degrid_beam_term(
     for o in range(nso):
         plane = sum(interp_mueller(term.mueller[o, i], term.l_axis, term.m_axis, l, m) * sub[i] for i in range(nsi))
         vis[o] = _degrid_real_imag(uvw, freq, plane[None], sign=sign, mask=term_mask, **kw)[0]
+        if sub1 is None:
+            continue
+        # interpolate again rather than hold every entry of the block at full resolution
+        plane = sum(interp_mueller(term.mueller[o, i], term.l_axis, term.m_axis, l, m) * sub1[i] for i in range(nsi))
+        if term.dmueller is not None:
+            plane = plane + sum(
+                interp_mueller(term.dmueller[o, i], term.l_axis, term.m_axis, l, m) * sub[i] for i in range(nsi)
+            )
+        vis[o] += dnu[None, :] * _degrid_real_imag(uvw, freq, plane[None], sign=sign, mask=term_mask, **kw)[0]
     return vis
 
 
@@ -875,7 +905,9 @@ def model_to_apparent_vis_for_regions(
     depend on ``freq_out``; for the polynomial bases the chunk mean minimises
     the second-order error. Linear mode doubles every gridding pass and keeps
     one extra full image resident, except that an empty slope image (a box
-    model without a beam slope) is skipped by :func:`degrid_stokes`.
+    model without a beam slope) is skipped by :func:`degrid_stokes`. A beam
+    term's ``dmueller`` adds its slope (see :class:`BeamTerm`); with one, the
+    slope pass runs even for a box model, since ``M1·S0`` is not empty.
 
     Args:
         model_ds: An opened `.mds` dataset.
@@ -924,9 +956,9 @@ def model_to_apparent_vis_for_regions(
 
     image = render_model_region(model_ds, time=time, freq_out=freq_out)
     slope = dnu = None
+    if spectral == "flat" and beam_terms is not None and any(t.dmueller is not None for t in beam_terms):
+        raise ValueError("a beam term carries a dmueller, which needs spectral='linear'")
     if spectral == "linear":
-        if beam_terms is not None:
-            raise NotImplementedError("spectral='linear' with beam_terms")
         step = 1e-6 * freq_out
         kinks = frequency_kinks(model_ds)
         labels = np.searchsorted(kinks, np.r_[freq, freq_out, freq_out + step], side="right")
@@ -990,6 +1022,6 @@ def model_to_apparent_vis_for_regions(
             for term in beam_terms:
                 if term.rows is not None and not np.any(term.rows):
                     continue  # owns no rows here; skip its gridding passes
-                stokes_vis += _degrid_beam_term(uvw, freq, sub, term, l, m, mask, kw)
+                stokes_vis += _degrid_beam_term(uvw, freq, sub, term, l, m, mask, kw, sub1=sub1, dnu=dnu)
         out.append(stokes_vis_to_corr(stokes_vis, stokes_out, corr_types))
     return out
