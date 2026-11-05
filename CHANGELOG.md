@@ -5,6 +5,72 @@ All notable changes to pfb-model-spec are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-11-05
+
+### Added
+
+- **degrid**: Multi-region degrid with per-row beam terms (#27)
+- **degrid**: Separable bilinear interpolation of a coarse Mueller block
+- **degrid**: Region crop helpers move here from pfb-imaging (#27)
+- **degrid**: Pixel_lm, the sky coordinates of a model grid
+- Band-average-preserving box/tent frequency fits, tent by default (#29)
+- Fake-nodes basis so the model can be rendered between band centres (#29)
+- Remap coefficients of linear parametrisations onto a new grid
+- Minmod-limited tent kernel for the flux-conserving remap
+- Flux-conserving box remap between rectilinear grids (#23)
+- Optional sampling fields and flux_scale in .mds spec 0.1
+- Add pfbspec convert to upgrade .mds datasets to the current spec
+- Add pfbspec convert to upgrade .mds datasets to the current spec
+- Model2comps writes spec 0.1 (Y, X) models with a Stokes axis
+- Degrid (ny, nx) spec 0.1 models and upgrade older specs on read
+- Write spec 0.1 .mds datasets from build_mds_dataset and model_to_ds
+- Merge fit functions into a multi-Stokes (Y, X) fit_image_cube
+- Add .mds spec registry with genesis -> 0.1 upgrade
+
+### CI
+
+- Bump ruff-pre-commit to v0.17.0 to match the locked ruff
+
+### Changed
+
+- **degrid**: Fold model_to_apparent_vis_for_region into the plural wrapper
+- **degrid**: Interp_mueller keeps the beam block's precision
+
+### Dependencies
+
+- Bump the python-minor-patch group across 1 directory with 3 updates
+- Bump ruff
+- Bump ruff
+- Update uv-build requirement
+- Bump the python-minor-patch group across 1 directory with 3 updates
+- Update uv-build requirement
+
+### Documentation
+
+- The degrid API has more than five functions now
+- The multi-region beam API
+- Bring agent docs up to date with the flux-conserving remap
+- Implementation plan for flux-conserving remap (#23)
+- Rename remap kernel to tent, note pfb-imaging coarsening guard
+- Design for flux-conserving spatial remapping (#23)
+- Document spec versioning, convert, and the 0.1 schema
+- Implementation plan for spec versioning, convert and spec 0.1
+- Design for .mds spec versioning, convert command and spec 0.1
+
+### Fixed
+
+- **degrid**: Require stokes_out when beam_terms are given
+- **degrid**: Per-plane beam degrid, complex Mueller in the singular wrapper
+- Anchor each tent piece at its band's freq, not the edge midpoint (#29)
+- Conserve flux when rendering a model onto a different grid (#23)
+- Refuse nested convert stores, fit zero-weight single samples, upgrade once in degrid wrapper
+- Remote filesystems in full extra, clear genesis upgrade errors, model_to_ds shape checks, rollout notes
+
+### Testing
+
+- **degrid**: Restore the empty-mask crop assertions
+
+
 ## [0.0.3] - 2026-09-11
 
 ### Added
@@ -119,6 +185,7 @@ Co-authored-by: Copilot Autofix powered by AI <175728472+Copilot@users.noreply.g
 - Tidy synthetic modelspec test bounds and comments
 
 
+[0.1.0]: https://github.com/landmanbester/pfb-model-spec/compare/v0.0.3...v0.1.0
 [0.0.3]: https://github.com/landmanbester/pfb-model-spec/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/landmanbester/pfb-model-spec/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/landmanbester/pfb-model-spec/releases/tag/v0.0.1
