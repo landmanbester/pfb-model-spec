@@ -56,6 +56,9 @@ uv run --extra full pytest -v                           # run tests (the `full` 
 
 - **Commits must run with the project venv active** so the `generate-cabs` pre-commit hook can
   resolve the container image — see `.claude/rules/testing-and-ci.md` → "Committing".
+- **Never change the container image tag** (`_container_image.py`, or the `image:` line in
+  `cabs/*.yml`). The maintainer sets it by hand. This overrides older plans under `docs/superpowers/`
+  that say otherwise — see `.claude/rules/architecture.md` §6.
 - **Commit messages must be [Conventional Commits](https://www.conventionalcommits.org/)**
   (enforced by a `commit-msg` hook).
 
@@ -80,3 +83,17 @@ src/pfb_model_spec/
 └── cabs/                  # AUTO-GENERATED Stimela YAMLs — never hand-edit
 tests/                     # synthetic, MS-free tests (+ _synth.py helpers)
 ```
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues on `landmanbester/pfb-model-spec` (via `gh`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root (created lazily). See `docs/agents/domain.md`.

@@ -13,7 +13,7 @@ model cube passed in or returned here is `(nband, nstokes, ny, nx)` -- the FITS/
 import numpy as np
 import xarray as xr
 
-from pfb_model_spec.utils.modelspec import eval_coeffs_to_slice, fit_image_cube
+from pfb_model_spec.utils.modelspec import eval_coeffs_to_cube, fit_image_cube
 from pfb_model_spec.utils.spec import SPEC_VERSION
 
 
@@ -266,30 +266,6 @@ def model_to_ds(
     )
     coeff_dataset.to_zarr(mds_name, mode="w")
 
-    nband, nstokes = model.shape[:2]
-    new_model = np.zeros((nband, nstokes, ny, nx), dtype=model.dtype)
-    for b in range(nband):
-        new_model[b] = eval_coeffs_to_slice(
-            time[0],
-            freq[b],
-            coeffs,
-            y_index,
-            x_index,
-            expr,
-            params,
-            texpr,
-            fexpr,
-            nxi=nx,
-            nyi=ny,
-            cellxi=cell_rad,
-            cellyi=cell_rad,
-            x0i=x0,
-            y0i=y0,
-            nxo=nx,
-            nyo=ny,
-            cellxo=cell_rad,
-            cellyo=cell_rad,
-            x0o=x0,
-            y0o=y0,
-        )
-    return new_model
+    # render on the model's own grid at every band, fitted or not
+    cube = eval_coeffs_to_cube(time[:1], freq, nx, ny, coeffs, y_index, x_index, expr, params, texpr, fexpr)
+    return cube[0].astype(model.dtype, copy=False)

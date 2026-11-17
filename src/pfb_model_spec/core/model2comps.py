@@ -22,7 +22,7 @@ import numpy as np
 from pfb_model_spec import __version__
 from pfb_model_spec.utils.fits import save_fits, set_wcs
 from pfb_model_spec.utils.io import build_mds_dataset
-from pfb_model_spec.utils.modelspec import eval_coeffs_to_slice, fit_image_cube
+from pfb_model_spec.utils.modelspec import eval_coeffs_to_cube, fit_image_cube
 
 log = logging.getLogger("pfb_model_spec.model2comps")
 
@@ -177,15 +177,14 @@ def model2comps(
 
     if nbasisf is None:
         nbasisf = nband - 1
-    fsel = np.ones(nband, dtype=bool)
 
     log.info(f"Fitting {nband} bands with {nbasisf} basis functions")
     try:
         coeffs, y_index, x_index, expr, params, texpr, fexpr = fit_image_cube(
             time,
-            mfreqs[fsel],
-            model[None, fsel, None],
-            wgt=wsums[None, fsel, None],
+            mfreqs,
+            model[None, :, None],
+            wgt=wsums[None, :, None],
             nbasisf=nbasisf,
             method=fit_mode,
             sigmasq=sigmasq,
@@ -218,13 +217,12 @@ def model2comps(
     log.info(f"Writing component model to {coeff_name}")
     coeff_dataset.to_zarr(coeff_name, mode="w")
 
+    def render(freqs: np.ndarray) -> np.ndarray:
+        # on the fit's own grid: (nfreq, nstokes, ny, nx)
+        return eval_coeffs_to_cube(time, freqs, nx, ny, coeffs, y_index, x_index, expr, params, texpr, fexpr)[0]
+
     # re-render at the input bands to report the fit's interpolation error
-    modelo = np.stack(
-        [
-            _render(coeffs, y_index, x_index, expr, params, texpr, fexpr, time[0], mfreqs[b], nx, ny, cell_rad, x0, y0)
-            for b in range(nband)
-        ]
-    )
+    modelo = render(mfreqs)
     denom = np.linalg.norm(model.ravel())
     if denom > 0:
         log.info(f"Fractional interpolation error is {np.linalg.norm((modelo[:, 0] - model).ravel()) / denom:.3e}")
@@ -234,43 +232,11 @@ def model2comps(
         flow, fhigh, step = map(float, out_freqs.split(":"))
         freq_out = np.linspace(flow, fhigh, int((fhigh - flow) / step))
         log.info(f"Rendering model cube to {freq_out.size} output bands")
-        modelo = np.stack(
-            [
-                _render(coeffs, y_index, x_index, expr, params, texpr, fexpr, time[0], f, nx, ny, cell_rad, x0, y0)
-                for f in freq_out
-            ]
-        )
+        modelo = render(freq_out)
     else:
         freq_out = mfreqs
 
     hdr = set_wcs(cell_deg, cell_deg, nx, ny, radec, freq_out, unit="Jy/pixel")
     os.makedirs(fits_dir, exist_ok=True)
     log.info(f"Writing rendered model to {fits_name}")
-    save_fits(modelo, fits_name, hdr, overwrite=overwrite, yx_order=True)
-
-
-def _render(coeffs, y_index, x_index, expr, params, texpr, fexpr, t, f, nx, ny, cell_rad, x0, y0):
-    """Render coefficients to a ``(nstokes, ny, nx)`` slice at time ``t``, frequency ``f``.
-
-    The output grid matches the fit grid (same npix/cell/centre), so this is the identity
-    resample used for the interpolation-error and sanity-FITS renders.
-    """
-    geometry = dict(nxi=nx, nyi=ny, cellxi=cell_rad, cellyi=cell_rad, x0i=x0, y0i=y0)
-    return eval_coeffs_to_slice(
-        t,
-        f,
-        coeffs,
-        y_index,
-        x_index,
-        expr,
-        params,
-        texpr,
-        fexpr,
-        **geometry,
-        nxo=nx,
-        nyo=ny,
-        cellxo=cell_rad,
-        cellyo=cell_rad,
-        x0o=x0,
-        y0o=y0,
-    )
+    save_fits(modelo, fits_name, hdr, overwrite=overwrite)

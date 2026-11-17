@@ -76,7 +76,7 @@ the FITS/astropy order, so callers (pfb-imaging, `model2comps`) no longer transp
 - `model_to_ds(time, freq, fsel, model, wgt, mds_name, cell_rad, nx, ny, x0, y0, flip_u, flip_v,
   flip_w, radec, stokes, writer_version, nbasisf=None, method="tent", sigmasq=1e-6, *, freq_bounds=None, time_bounds=None, flux_scale=None)` → fits
   `model[fsel]` via `fit_image_cube`, writes the coefficients to `mds_name` (zarr, `mode="w"`), then
-  re-renders the fit at every band in `freq` via `eval_coeffs_to_slice` and returns the resulting
+  re-renders the fit at every band in `freq` on its own grid (`eval_coeffs_to_cube`) and returns the resulting
   cube. `model` is `(nband, nstokes, ny, nx)`, `wgt` `(nband, nstokes)`, `stokes` a `list[str]`,
   and the return is `(nband, nstokes, ny, nx)` (see "Axis convention"; no transpose). This is
   what pfb-imaging's `deconv.py` calls each minor cycle to persist and re-evaluate the component

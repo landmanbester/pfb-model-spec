@@ -41,7 +41,10 @@ release.
   required, or modelspec tests fail to import). Honors a `[skip checks]` commit tag.
 - **`publish.yml`** — on `v*` tags: lint + `uv build` + PyPI trusted publishing (environment `pypi`).
   Does **not** run tests (they run in `ci.yml`).
-- **`publish-container.yml`** — builds/pushes the image to GHCR on tags, `main`, and PRs. The image
+- **`publish-container.yml`** — builds/pushes the image to GHCR on `v*` tags and pushes to `main`
+  only, never on PRs. Feature-branch images are built on demand by the maintainer
+  (`gh workflow run publish-container.yml --ref <branch>`, tag = branch name with `/` → `-`); agents
+  never trigger it or change the image tag (see `architecture.md` §6). The image
   build runs `uv pip install ".[full]"`; the Dockerfile must `COPY … LICENSE ./` because
   `pyproject.toml` sets `license-files = ["LICENSE"]` (newer `uv_build` errors if the license glob
   matches nothing in the build context).

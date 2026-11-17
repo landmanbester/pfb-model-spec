@@ -7,12 +7,9 @@ parametrisation, CASA beam tables, and observation-time handling: a component
 model has no restoring beam and no meaningful DATE-OBS. This module has no
 dependency on pfb-imaging.
 
-Axis convention: the `.mds` spec 0.1 is `(Y, X)`, so ``save_fits`` is called with
-``yx_order=True``; the default ``yx_order=False`` accepts x-major `(..., nx, ny)` input and
-transposes to FITS row-major on write.
+Axis convention: ``save_fits`` takes `(..., ny, nx)` cubes, the `.mds` spec 0.1 / FITS
+row-major order, so the spatial axes are never transposed on write.
 """
-
-from datetime import datetime, timezone
 
 import numpy as np
 from astropy.io import fits
@@ -35,31 +32,25 @@ def to4d(data: np.ndarray) -> np.ndarray:
         raise ValueError("Only arrays with ndim <= 4 can be broadcast to 4D.")
 
 
-def save_fits(data, name, hdr, overwrite=True, dtype=np.float32, yx_order=False):
+def save_fits(data, name, hdr, overwrite=True, dtype=np.float32):
     """Write ``data`` to a FITS image with header ``hdr``.
 
     Args:
-        data: Model cube, x-major `(..., nx, ny)` by default (`yx_order=False`)
-            or FITS-native `(..., ny, nx)` when `yx_order=True`. Broadcast to 4D.
+        data: Model cube `(..., ny, nx)`, FITS row-major. Broadcast to 4D `(nband, nstokes, ny, nx)`.
         name: Output FITS path.
         hdr: FITS header (e.g. from ``set_wcs``).
         overwrite: Overwrite an existing file.
         dtype: On-disk data type.
-        yx_order: Set when ``data`` is already `(..., ny, nx)` row-major.
     """
     hdu = fits.PrimaryHDU(header=hdr)
-    if yx_order:
-        # already (..., ny, nx) FITS row-major; only move band/corr onto the axis order
-        data = np.transpose(to4d(data), axes=(1, 0, 2, 3))
-    else:
-        # x-major (..., nx, ny) input
-        data = np.transpose(to4d(data), axes=(1, 0, 3, 2))
+    # (nband, nstokes, ny, nx) -> FITS (STOKES, FREQ, DEC, RA) axis order
+    data = np.transpose(to4d(data), axes=(1, 0, 2, 3))
     hdu.data = np.require(data, dtype=dtype, requirements="F")
     hdu.writeto(name, overwrite=overwrite)
 
 
-def set_wcs(cell_x, cell_y, nx, ny, radec, freq, unit="Jy/pixel", ms_time=None, header=True, ncorr=1):
-    """Build a FITS header (or ``astropy.wcs.WCS``) for a model cube.
+def set_wcs(cell_x, cell_y, nx, ny, radec, freq, unit="Jy/pixel", ncorr=1):
+    """Build a FITS header for a model cube.
 
     Args:
         cell_x: Pixel size along x (RA) in degrees.
@@ -69,13 +60,10 @@ def set_wcs(cell_x, cell_y, nx, ny, radec, freq, unit="Jy/pixel", ms_time=None, 
         radec: `(ra, dec)` of the phase centre in radians.
         freq: Frequency (Hz) scalar or array of channel frequencies.
         unit: BUNIT value.
-        ms_time: Optional observation time in **unix seconds**; writes DATE-OBS
-            when given (component models normally leave this unset).
-        header: Return a ``fits.Header`` when True, else the ``WCS`` object.
         ncorr: Number of correlation/Stokes planes (NAXIS4).
 
     Returns:
-        A ``fits.Header`` (``header=True``) or an ``astropy.wcs.WCS``.
+        A ``fits.Header``.
     """
     w = WCS(naxis=4)
     w.wcs.ctype = ["RA---SIN", "DEC--SIN", "FREQ", "STOKES"]
@@ -99,9 +87,6 @@ def set_wcs(cell_x, cell_y, nx, ny, radec, freq, unit="Jy/pixel", ms_time=None, 
     w.wcs.crpix = [1 + nx // 2, 1 + ny // 2, crpix3, 1]
     w.wcs.equinox = 2000.0
 
-    if not header:
-        return w
-
     hdr = fits.Header()
     hdr["SIMPLE"] = (True, "conforms to FITS standard")
     hdr["BITPIX"] = (-32, "array data type")
@@ -118,8 +103,4 @@ def set_wcs(cell_x, cell_y, nx, ny, radec, freq, unit="Jy/pixel", ms_time=None, 
     hdr["RESTFRQ"] = ref_freq
     hdr["ORIGIN"] = f"pfb-model-spec: v{__version__}"
     hdr["SPECSYS"] = "TOPOCENT"
-    if ms_time is not None:
-        utc_iso = datetime.fromtimestamp(ms_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        hdr["UTC_TIME"] = utc_iso
-        hdr["DATE-OBS"] = utc_iso
     return hdr
