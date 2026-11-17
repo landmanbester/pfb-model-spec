@@ -88,7 +88,15 @@ keep them in sync with `cli/*.py`:
 **It is deliberately *not* always `:latest`** — its value depends on context, and a non-`latest`
 value on a branch is expected, not a bug:
 
-- **Feature branch:** set the tag to the branch name (e.g. `:my-feature`); `publish-container.yml`
-  builds/pushes that tag on each PR push.
-- **`main`:** `update-cabs.yml` resets it to `:latest`.
-- **Release:** `tbump <version>` sets it to the semantic version.
+- **Feature branch:** the maintainer changes the tag by hand, and only when they want a
+  feature-branch image. It is then the branch name with slashes replaced by dashes
+  (`feat/x` → `:feat-x`), built on demand with
+  `gh workflow run publish-container.yml --ref <branch>`. PR pushes build nothing.
+- **`main`:** `update-cabs.yml` resets it to `:latest`; `publish-container.yml` builds `:latest`
+  on every push to `main`.
+- **Release:** `tbump <version>` sets it to the semantic version; the `v*` tag builds that image.
+
+**Agents never change the image tag.** Do not edit `_container_image.py`, and do not hand-edit
+the `image:` line in `cabs/*.yml` (the pre-commit hook regenerates it from `CONTAINER_IMAGE`).
+Whatever value is on the branch is the maintainer's choice, so leave it as it is. This overrides any older plan or
+spec under `docs/superpowers/` that says to set a feature-branch tag.

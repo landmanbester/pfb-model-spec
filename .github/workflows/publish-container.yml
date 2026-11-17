@@ -3,17 +3,17 @@ name: Publish Container
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*'  # releases: tbump points CONTAINER_IMAGE and the cabs at :<version>
     branches:
       - main
-  pull_request:
-    branches:
-      - main
+  # Feature branches are built on demand only, never on PR pushes:
+  #   gh workflow run publish-container.yml --ref <branch>
+  # The image is tagged with the branch name, slashes replaced by dashes (feat/x -> :feat-x).
   workflow_dispatch:
 
 # Cab generation is handled by pre-commit hooks locally.
-# This workflow only builds and pushes container images so users can test
-# hotfixes using stimela (which pulls images specified in cab definitions).
+# This workflow only builds and pushes container images (stimela pulls the image
+# named in the cab definitions).
 
 env:
   REGISTRY: ghcr.io
@@ -45,8 +45,8 @@ jobs:
             # For version tags: v0.2.0 -> 0.2.0, v0.2.0rc1 -> 0.2.0rc1
             type=pep440,pattern={{version}}
             type=pep440,pattern={{major}}.{{minor}}
-            # For PRs: use branch name (e.g., ghcr.io/user/repo:feature-branch)
-            type=raw,value=${{ github.head_ref }},enable=${{ github.event_name == 'pull_request' }}
+            # For a manual run on a feature branch: the sanitised branch name (feat/x -> feat-x)
+            type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
             # For main branch: use 'latest'
             type=raw,value=latest,enable={{is_default_branch}}
 

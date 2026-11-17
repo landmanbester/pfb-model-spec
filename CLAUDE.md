@@ -56,6 +56,9 @@ uv run --extra full pytest -v                           # run tests (the `full` 
 
 - **Commits must run with the project venv active** so the `generate-cabs` pre-commit hook can
   resolve the container image — see `.claude/rules/testing-and-ci.md` → "Committing".
+- **Never change the container image tag** (`_container_image.py`, or the `image:` line in
+  `cabs/*.yml`). The maintainer sets it by hand. This overrides older plans under `docs/superpowers/`
+  that say otherwise — see `.claude/rules/architecture.md` §6.
 - **Commit messages must be [Conventional Commits](https://www.conventionalcommits.org/)**
   (enforced by a `commit-msg` hook).
 
