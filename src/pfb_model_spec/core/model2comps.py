@@ -217,7 +217,7 @@ def model2comps(
     log.info(f"Writing component model to {coeff_name}")
     coeff_dataset.to_zarr(coeff_name, mode="w")
 
-    def render(freqs):
+    def render(freqs: np.ndarray) -> np.ndarray:
         # on the fit's own grid: (nfreq, nstokes, ny, nx)
         return eval_coeffs_to_cube(time, freqs, nx, ny, coeffs, y_index, x_index, expr, params, texpr, fexpr)[0]
 
