@@ -29,6 +29,33 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Tags, labels and annotations are computed once and shared, so each image's
+  # labels (version included) agree with the tags the manifest is published under.
+  meta:
+    name: Image metadata
+    runs-on: ubuntu-latest
+    outputs:
+      json: ${{ steps.meta.outputs.json }}
+      labels: ${{ steps.meta.outputs.labels }}
+      annotations: ${{ steps.meta.outputs.annotations }}
+    steps:
+      - name: Extract metadata for container
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          # Annotations go on the manifest list; labels go in each image's config.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # For version tags: v0.2.0 -> 0.2.0, v0.2.0rc1 -> 0.2.0rc1
+            type=pep440,pattern={{version}}
+            type=pep440,pattern={{major}}.{{minor}}
+            # For a manual run on a feature branch: the sanitised branch name (feat/x -> feat-x)
+            type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+            # For main branch: use 'latest'
+            type=raw,value=latest,enable={{is_default_branch}}
+
   # Build each architecture on its own native runner and push it by digest; the
   # `merge` job stitches the digests into one multi-arch manifest under the real
   # tags, so `docker pull <image>:latest` resolves to arm64 on Apple Silicon or a
@@ -41,6 +68,7 @@ jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
+    needs: [meta]
     permissions:
       packages: write
     strategy:
@@ -68,21 +96,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Labels (source, revision, version, ...) live in each image's config, so
-      # they must be set here; the merge job only applies tags to the manifest.
-      - name: Extract labels for container
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
+          # Labels (source, revision, version, ...) live in each image's config, so
+          # they are set here; the merge job only applies tags to the manifest.
+          labels: ${{ needs.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
@@ -105,7 +127,7 @@ jobs:
   merge:
     name: Merge manifest
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [meta, build]
     permissions:
       packages: write
     steps:
@@ -126,33 +148,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for container
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            # For version tags: v0.2.0 -> 0.2.0, v0.2.0rc1 -> 0.2.0rc1
-            type=pep440,pattern={{version}}
-            type=pep440,pattern={{major}}.{{minor}}
-            # For a manual run on a feature branch: the sanitised branch name (feat/x -> feat-x)
-            type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
-            # For main branch: use 'latest'
-            type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Create multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
+        env:
+          META_JSON: ${{ needs.meta.outputs.json }}
+          ANNOTATIONS: ${{ needs.meta.outputs.annotations }}
         run: |
           set -euo pipefail
+          annotations=()
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then annotations+=(--annotation "$line"); fi
+          done <<< "$ANNOTATIONS"
           docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            "${annotations[@]}" \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META_JSON") \
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Check every built architecture is in the manifest
         working-directory: ${{ runner.temp }}/digests
+        env:
+          META_JSON: ${{ needs.meta.outputs.json }}
         run: |
           set -euo pipefail
-          TAG=$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          TAG=$(jq -cr '.tags[0]' <<< "$META_JSON")
           docker buildx imagetools inspect "$TAG"
           # Attestation manifests report platform unknown/unknown; count only real images.
           built=$(ls | wc -l)

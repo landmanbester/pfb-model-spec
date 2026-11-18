@@ -53,14 +53,19 @@ release.
   Does **not** run tests (they run in `ci.yml`).
 - **`publish-container.yml`** — builds/pushes the image to GHCR on `v*` tags and pushes to `main`
   only, never on PRs. The image is multi-arch: amd64 and arm64 build on native runners and push by
-  digest, and a `merge` job tags one manifest (failing if an architecture is missing). A per-ref
-  `concurrency` group cancels superseded builds, so `:latest` comes from the newest `main` commit.
+  digest, and a `merge` job tags one manifest (failing if an architecture is missing). A shared
+  `meta` job computes tags, labels and index annotations once: labels live in each image's config,
+  so the per-arch builds set them, and sharing them keeps the `version` label equal to the published
+  tag. A per-ref `concurrency` group cancels superseded builds, so `:latest` comes from the newest
+  `main` commit.
   Feature-branch images are built on demand by the maintainer
   (`gh workflow run publish-container.yml --ref <branch>`, tag = branch name with `/` → `-`); agents
   never trigger it or change the image tag (see `architecture.md` §6). The image installs from the
-  lock (`uv export --frozen --extra full` → `uv pip install -r`, then the project with `--no-deps`),
+  lock (`uv export --locked --extra full` → `uv pip install -r`, then the project with `--no-deps`),
   so every architecture runs the versions CI tested and dependencies move only when `uv.lock` does.
-  The Dockerfile must `COPY … uv.lock LICENSE ./`; `LICENSE` because `pyproject.toml` sets
+  `--locked` fails the build if `uv.lock` is stale — run `uv lock` after editing dependencies. The
+  dependency layer copies only `pyproject.toml`/`uv.lock`, so it stays cached until the lock
+  changes. The Dockerfile must also `COPY … LICENSE ./`, because `pyproject.toml` sets
   `license-files = ["LICENSE"]` (newer `uv_build` errors if the license glob matches nothing in the
   build context).
 - **`update-cabs.yml`** — on push to `main`, resets the image tag to `latest`, regenerates cabs, and
