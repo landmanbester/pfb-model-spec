@@ -43,9 +43,8 @@ minimalism**; when in doubt, consult [The Twelve Factor App](https://12factor.ne
   `"0.1"` (Stokes axis, `(Y, X)` cubes); older `.mds` stores upgrade on read; a schema change needs a
   breaking version bump plus a registry step. See `.claude/rules/component-model.md` → "Spec versions".
 - **hip-cargo transition (#48):** hip-cargo is tracked from its `main` branch via
-  `[tool.uv.sources]` until 0.5.0 is on PyPI (the Dockerfile installs `git` and constrains
-  hip-cargo to the commit `uv.lock` pins). Do not release meanwhile. Afterwards: floors to
-  `>=0.5.0`, drop the source table, the `git` layer and the Dockerfile's lock pin.
+  `[tool.uv.sources]` until 0.5.0 is on PyPI (the Dockerfile installs `git` for it). Do not
+  release meanwhile. Afterwards: floors to `>=0.5.0`, drop the source table and the `git` layer.
 - **Deferred (not yet built):** the pfb-imaging `.dds` reading path (coupled to pfb-imaging's
   dataset format / daskms). See `.claude/rules/component-model.md`.
 

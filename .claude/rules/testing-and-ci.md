@@ -57,9 +57,12 @@ release.
   `concurrency` group cancels superseded builds, so `:latest` comes from the newest `main` commit.
   Feature-branch images are built on demand by the maintainer
   (`gh workflow run publish-container.yml --ref <branch>`, tag = branch name with `/` → `-`); agents
-  never trigger it or change the image tag (see `architecture.md` §6). The image build runs `uv pip install ".[full]"`; the Dockerfile must `COPY … LICENSE ./` because
-  `pyproject.toml` sets `license-files = ["LICENSE"]` (newer `uv_build` errors if the license glob
-  matches nothing in the build context).
+  never trigger it or change the image tag (see `architecture.md` §6). The image installs from the
+  lock (`uv export --frozen --extra full` → `uv pip install -r`, then the project with `--no-deps`),
+  so every architecture runs the versions CI tested and dependencies move only when `uv.lock` does.
+  The Dockerfile must `COPY … uv.lock LICENSE ./`; `LICENSE` because `pyproject.toml` sets
+  `license-files = ["LICENSE"]` (newer `uv_build` errors if the license glob matches nothing in the
+  build context).
 - **`update-cabs.yml`** — on push to `main`, resets the image tag to `latest`, regenerates cabs, and
   pushes a `[skip checks]` commit. Requires the `APP_CLIENT_ID`/`APP_PRIVATE_KEY` GitHub App secrets.
 

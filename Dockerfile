@@ -15,14 +15,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.8 /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ src/
 
-# Install package with full dependencies.
-# TRANSITION (#48): constrain hip-cargo to the commit uv.lock pins, so every
-# architecture gets the revision CI tested rather than whatever main is at build
-# time. Drop uv.lock, the export and the -c with the git source.
-RUN uv export --frozen --no-hashes --no-emit-project --no-default-groups --extra full \
-        | grep '^hip-cargo @ ' > /tmp/hip-cargo-pin.txt \
-    && cat /tmp/hip-cargo-pin.txt \
-    && uv pip install --system --no-cache ".[full]" -c /tmp/hip-cargo-pin.txt
+# Install exactly the dependency versions in uv.lock -- the ones CI tested -- so
+# every architecture gets the same versions. Dependencies move only when uv.lock
+# does (e.g. a Dependabot lock update); the project itself goes in last, without deps.
+RUN uv export --frozen --no-default-groups --extra full --no-emit-project -o /tmp/requirements.txt \
+    && uv pip install --system --no-cache -r /tmp/requirements.txt \
+    && uv pip install --system --no-cache --no-deps .
 
 # Make CLI available
 CMD ["pfbspec", "--help"]
