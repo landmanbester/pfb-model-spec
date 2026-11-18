@@ -1,10 +1,7 @@
-from pathlib import Path
-from typing import Annotated, Literal, NewType
+from typing import Annotated, Literal
 
 import typer
-from hip_cargo import StimelaMeta, parse_upath, stimela_cab, stimela_output
-
-Directory = NewType("Directory", Path)
+from hip_cargo import Directory, StimelaMeta, parse_upath, stimela_cab, stimela_output
 
 
 @stimela_cab(
@@ -73,33 +70,28 @@ def convert(
     """
     Upgrade a component model (.mds) to the current spec.
     """
+    params = dict(
+        input_mds=input_mds,
+        overwrite=overwrite,
+        output_mds=output_mds,
+    )
+
     if backend == "native" or backend == "auto":
+        # Only a missing install falls back to the container, so only the
+        # imports and the pre-flight are guarded; the core call is not.
         try:
-            # Pre-flight must_exist for remote URIs before dispatching.
             from hip_cargo.utils.runner import preflight_remote_must_exist  # noqa: E402
 
-            preflight_remote_must_exist(
-                convert,
-                dict(
-                    input_mds=input_mds,
-                    overwrite=overwrite,
-                    output_mds=output_mds,
-                ),
-            )
-
-            # Lazy import the core implementation
             from pfb_model_spec.core.convert import convert as convert_core  # noqa: E402
 
-            # Call the core function with all parameters
-            convert_core(
-                input_mds,
-                overwrite=overwrite,
-                output_mds=output_mds,
-            )
-            return
+            # Pre-flight must_exist for remote URIs before dispatching.
+            preflight_remote_must_exist(convert, params)
         except ImportError:
             if backend == "native":
                 raise
+        else:
+            convert_core(**params)
+            return
 
     # Resolve container image from installed package metadata
     from hip_cargo.utils.config import get_container_image  # noqa: E402
@@ -111,11 +103,7 @@ def convert(
 
     run_in_container(
         convert,
-        dict(
-            input_mds=input_mds,
-            overwrite=overwrite,
-            output_mds=output_mds,
-        ),
+        params,
         image=image,
         backend=backend,
         always_pull_images=always_pull_images,
