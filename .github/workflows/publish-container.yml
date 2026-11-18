@@ -9,25 +9,106 @@ on:
   # Feature branches are built on demand only, never on PR pushes:
   #   gh workflow run publish-container.yml --ref <branch>
   # The image is tagged with the branch name, slashes replaced by dashes (feat/x -> :feat-x).
+  # A dispatch runs only on branches in this repo and needs write access, so a
+  # fork's Dockerfile never builds with this repo's packages:write token.
   workflow_dispatch:
 
 # Cab generation is handled by pre-commit hooks locally.
-# This workflow only builds and pushes container images (stimela pulls the image
-# named in the cab definitions).
+# This workflow only builds and pushes container images (stimela and the
+# container fallback pull the image named in the cab definitions).
+
+# A later push to the same ref cancels an in-flight build, so :latest always comes
+# from the newest commit on main (the update-cabs bot commit supersedes the merge).
+# Release tags get their own group and are never cancelled by pushes to main.
+concurrency:
+  group: publish-container-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  publish-container:
-    runs-on: ubuntu-latest
+  # Build each architecture on its own native runner and push it by digest; the
+  # `merge` job stitches the digests into one multi-arch manifest under the real
+  # tags, so `docker pull <image>:latest` resolves to arm64 on Apple Silicon or a
+  # DGX Spark and to amd64 elsewhere.
+  #
+  # Native runners rather than QEMU: emulated arm64 builds are roughly an order
+  # of magnitude slower, which bites as soon as a dependency has no aarch64 wheel
+  # and compiles from source. ubuntu-24.04-arm runners are free for public repos.
+  # For an amd64-only image, delete the arm64 entry; nothing else changes.
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.suffix }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: Merge manifest
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Container Registry
         uses: docker/login-action@v4
@@ -50,10 +131,25 @@ jobs:
             # For main branch: use 'latest'
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Create multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Check every built architecture is in the manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          TAG=$(jq -cr '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools inspect "$TAG"
+          # Attestation manifests report platform unknown/unknown; count only real images.
+          built=$(ls | wc -l)
+          listed=$(docker buildx imagetools inspect --raw "$TAG" \
+            | jq '[.manifests[] | select(.platform.architecture != "unknown")] | length')
+          if [ "$built" -ne "$listed" ]; then
+            echo "::error::built $built architectures but $TAG lists $listed"
+            exit 1
+          fi
