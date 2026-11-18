@@ -9,7 +9,9 @@ reviews**.
 
 - **The container image tag** in `src/pfb_model_spec/_container_image.py` (`CONTAINER_IMAGE`) and the
   `image:` field in `src/pfb_model_spec/cabs/*.yml`. The tag is **deliberately not always `latest`**:
-  - feature branches use the **branch name** as the tag (e.g. `:my-feature`);
+  - on a feature branch, only the maintainer sets it, by hand, and only when they want a
+    feature-branch image: the branch name with `/` → `-` (`feat/x` → `:feat-x`), built on demand
+    with `gh workflow run publish-container.yml --ref <branch>`. Agents never change it;
   - `main` is reset to `:latest` automatically by the `update-cabs.yml` workflow on merge;
   - releases use the **semantic version** via `tbump`.
   A non-`latest` tag on a branch, or a cab whose `image:` matches the branch tag, is **correct** —

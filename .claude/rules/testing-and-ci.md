@@ -11,8 +11,12 @@ release.
   uv run --extra full pytest -v
   ```
   Plain `uv run pytest` may omit the extra and the modelspec test will fail on `import numpy`.
-- `tests/test_roundtrip.py` guards that each `cli/<cmd>.py` round-trips through its generated cab
-  (`generate-cabs` → `generate-function`) byte-identically. Add a case per new command.
+- `tests/test_roundtrip.py` (hip-cargo's template) discovers every `cli/<cmd>.py` and checks both
+  directions: the committed cab is what `generate-cabs` emits, and the committed CLI is what
+  `generate-function` emits from that cab, byte for byte. New commands need no change here. If the
+  CLI direction fails, regenerate the module from its cab — never hand-fix `cli/*.py`.
+- `tests/test_precommit.py` guards that the ruff `rev:` in `.pre-commit-config.yaml` equals the
+  ruff in `uv.lock`; bump the hook when ruff moves in the lock.
 - `tests/test_spec.py` guards that `SPEC_VERSION` is not behind the package `major.minor`.
 - `tests/_genesis.py` is a frozen fixture (the genesis writer) and must never be updated to follow
   the library.
@@ -36,16 +40,24 @@ release.
   `chore(release):` prefix for ordinary work (it's skipped from the changelog).
 
 ## 3. GitHub workflows
-- **`ci.yml`** — `quality` job (ruff, lint-only) + `test` matrix. The test job installs with
-  `uv sync --extra full --group test` and runs `uv run --extra full pytest` (the `full` extra is
-  required, or modelspec tests fail to import). Honors a `[skip checks]` commit tag.
+- **`ci.yml`** — `quality` job (ruff, lint-only), a `test` matrix and a `lightweight` job. The
+  full suite runs on the oldest and newest Python the `full` extra supports (`Tests (3.11)`,
+  `Tests (3.14)`) plus `Tests (3.14, arm64)`; `UV_PYTHON` comes from the matrix (otherwise uv
+  follows `.python-version`). It installs with `uv sync --extra full --group test` and runs
+  `uv run --extra full pytest` (the `full` extra is required, or modelspec tests fail to import).
+  **Python 3.10 is lightweight-only**: `Lightweight install (3.10)` installs without extras and runs
+  `pfbspec --help`, which imports every `cli/` module; its Python must equal the `requires-python`
+  floor. These job names are the required checks on `main` — renaming a job means updating the
+  ruleset. Honors a `[skip checks]` commit tag.
 - **`publish.yml`** — on `v*` tags: lint + `uv build` + PyPI trusted publishing (environment `pypi`).
   Does **not** run tests (they run in `ci.yml`).
 - **`publish-container.yml`** — builds/pushes the image to GHCR on `v*` tags and pushes to `main`
-  only, never on PRs. Feature-branch images are built on demand by the maintainer
+  only, never on PRs. The image is multi-arch: amd64 and arm64 build on native runners and push by
+  digest, and a `merge` job tags one manifest (failing if an architecture is missing). A per-ref
+  `concurrency` group cancels superseded builds, so `:latest` comes from the newest `main` commit.
+  Feature-branch images are built on demand by the maintainer
   (`gh workflow run publish-container.yml --ref <branch>`, tag = branch name with `/` → `-`); agents
-  never trigger it or change the image tag (see `architecture.md` §6). The image
-  build runs `uv pip install ".[full]"`; the Dockerfile must `COPY … LICENSE ./` because
+  never trigger it or change the image tag (see `architecture.md` §6). The image build runs `uv pip install ".[full]"`; the Dockerfile must `COPY … LICENSE ./` because
   `pyproject.toml` sets `license-files = ["LICENSE"]` (newer `uv_build` errors if the license glob
   matches nothing in the build context).
 - **`update-cabs.yml`** — on push to `main`, resets the image tag to `latest`, regenerates cabs, and
