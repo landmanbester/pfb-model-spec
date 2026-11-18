@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "hip-cargo>=0.2.2",
+    "hip-cargo>=0.4.0",
 ]
 
 # Lightweight install (default):  pip install pfb-model-spec
@@ -38,6 +38,14 @@ full = [
     "xarray",
     "zarr",
 ]
+
+# TRANSITION (landmanbester/pfb-model-spec#48): track hip-cargo main until 0.5.0 is
+# on PyPI, then raise both floors above to >=0.5.0 and delete this table (and the
+# `git` install in the Dockerfile). uv.lock pins the commit; refresh it with
+# `uv lock --upgrade-package hip-cargo`. Do not release pfb-model-spec meanwhile:
+# the generated CLIs import path types that hip-cargo 0.4.0 does not provide.
+[tool.uv.sources]
+hip-cargo = { git = "https://github.com/landmanbester/hip-cargo", branch = "main" }
 
 [project.urls]
 Homepage = "https://github.com/landmanbester/pfb-model-spec"
