@@ -11,16 +11,18 @@ RUN apt-get update \
 # Install uv for fast package installation
 COPY --from=ghcr.io/astral-sh/uv:0.9.8 /uv /usr/local/bin/uv
 
-# Copy package files (LICENSE is required by pyproject's license-files glob)
-COPY pyproject.toml uv.lock README.md LICENSE ./
-COPY src/ src/
-
-# Install exactly the dependency versions in uv.lock -- the ones CI tested -- so
-# every architecture gets the same versions. Dependencies move only when uv.lock
-# does (e.g. a Dependabot lock update); the project itself goes in last, without deps.
-RUN uv export --frozen --no-default-groups --extra full --no-emit-project -o /tmp/requirements.txt \
+# Install the locked dependencies first, so every architecture gets the versions
+# CI tested (and this layer is cached until uv.lock changes), then the package
+# itself without re-resolving. --locked fails the build if uv.lock is stale.
+COPY pyproject.toml uv.lock ./
+RUN uv export --locked --no-dev --extra full --no-emit-project --no-header -o /tmp/requirements.txt \
     && uv pip install --system --no-cache -r /tmp/requirements.txt \
-    && uv pip install --system --no-cache --no-deps .
+    && rm /tmp/requirements.txt
+
+# LICENSE is required by pyproject's license-files glob.
+COPY README.md LICENSE ./
+COPY src/ src/
+RUN uv pip install --system --no-cache --no-deps .
 
 # Make CLI available
 CMD ["pfbspec", "--help"]
