@@ -1,10 +1,7 @@
-from pathlib import Path
-from typing import Annotated, Literal, NewType
+from typing import Annotated, Literal
 
 import typer
-from hip_cargo import StimelaMeta, parse_upath, stimela_cab, stimela_output
-
-Directory = NewType("Directory", Path)
+from hip_cargo import Directory, StimelaMeta, parse_upath, stimela_cab, stimela_output
 
 
 @stimela_cab(
@@ -164,55 +161,39 @@ def model2comps(
     """
     Convert a WSClean-style FITS model cube to a component model.
     """
+    params = dict(
+        output_filename=output_filename,
+        from_fits=from_fits,
+        overwrite=overwrite,
+        nbasisf=nbasisf,
+        fit_mode=fit_mode,
+        min_val=min_val,
+        suffix=suffix,
+        model_name=model_name,
+        use_wsum=use_wsum,
+        sigmasq=sigmasq,
+        model_out=model_out,
+        out_freqs=out_freqs,
+        product=product,
+        fits_output_folder=fits_output_folder,
+    )
+
     if backend == "native" or backend == "auto":
+        # Only a missing install falls back to the container, so only the
+        # imports and the pre-flight are guarded; the core call is not.
         try:
-            # Pre-flight must_exist for remote URIs before dispatching.
             from hip_cargo.utils.runner import preflight_remote_must_exist  # noqa: E402
 
-            preflight_remote_must_exist(
-                model2comps,
-                dict(
-                    output_filename=output_filename,
-                    from_fits=from_fits,
-                    overwrite=overwrite,
-                    nbasisf=nbasisf,
-                    fit_mode=fit_mode,
-                    min_val=min_val,
-                    suffix=suffix,
-                    model_name=model_name,
-                    use_wsum=use_wsum,
-                    sigmasq=sigmasq,
-                    model_out=model_out,
-                    out_freqs=out_freqs,
-                    product=product,
-                    fits_output_folder=fits_output_folder,
-                ),
-            )
-
-            # Lazy import the core implementation
             from pfb_model_spec.core.model2comps import model2comps as model2comps_core  # noqa: E402
 
-            # Call the core function with all parameters
-            model2comps_core(
-                output_filename,
-                from_fits,
-                overwrite=overwrite,
-                nbasisf=nbasisf,
-                fit_mode=fit_mode,
-                min_val=min_val,
-                suffix=suffix,
-                model_name=model_name,
-                use_wsum=use_wsum,
-                sigmasq=sigmasq,
-                model_out=model_out,
-                out_freqs=out_freqs,
-                product=product,
-                fits_output_folder=fits_output_folder,
-            )
-            return
+            # Pre-flight must_exist for remote URIs before dispatching.
+            preflight_remote_must_exist(model2comps, params)
         except ImportError:
             if backend == "native":
                 raise
+        else:
+            model2comps_core(**params)
+            return
 
     # Resolve container image from installed package metadata
     from hip_cargo.utils.config import get_container_image  # noqa: E402
@@ -224,22 +205,7 @@ def model2comps(
 
     run_in_container(
         model2comps,
-        dict(
-            output_filename=output_filename,
-            from_fits=from_fits,
-            overwrite=overwrite,
-            nbasisf=nbasisf,
-            fit_mode=fit_mode,
-            min_val=min_val,
-            suffix=suffix,
-            model_name=model_name,
-            use_wsum=use_wsum,
-            sigmasq=sigmasq,
-            model_out=model_out,
-            out_freqs=out_freqs,
-            product=product,
-            fits_output_folder=fits_output_folder,
-        ),
+        params,
         image=image,
         backend=backend,
         always_pull_images=always_pull_images,

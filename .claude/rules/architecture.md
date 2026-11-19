@@ -26,8 +26,7 @@ scientific stack and break the lightweight install. This invariant is guarded by
    the core implementation inside the body.
 2. `src/pfb_model_spec/core/<name>.py` — the real implementation, same function name, no decorators.
 3. Register it in `src/pfb_model_spec/cli/__init__.py` (mirror the `model2comps` registration).
-4. Add a round-trip case to `tests/test_roundtrip.py`.
-5. Commit — the pre-commit hook regenerates `cabs/<name>.yml`.
+4. Commit — the pre-commit hook regenerates `cabs/<name>.yml`.
 
 **Never** create files under `cabs/` by hand.
 
@@ -47,20 +46,27 @@ Every generated `cli/*.py` wrapper has this shape (emitted by `hip-cargo generat
 
 ```python
 def my_command(...):
+    params = dict(...)
     if backend in ("native", "auto"):
-        try:
+        try:  # guards only the imports and the remote pre-flight
             from hip_cargo.utils.runner import preflight_remote_must_exist
-            preflight_remote_must_exist(my_command, dict(...))
-            from pfb_model_spec.core.my_command import my_command as core
-            core(...); return
+            from pfb_model_spec.core.my_command import my_command as my_command_core
+            preflight_remote_must_exist(my_command, params)
         except ImportError:
             if backend == "native":
                 raise
+        else:
+            my_command_core(**params); return  # an ImportError raised here propagates
     # heavy deps missing OR a container backend was chosen → run in container
     from hip_cargo.utils.config import get_container_image
     from hip_cargo.utils.runner import run_in_container
-    run_in_container(my_command, dict(...), image=get_container_image("pfb-model-spec"), backend=backend, ...)
+    run_in_container(my_command, params, image=get_container_image("pfb-model-spec"), backend=backend, ...)
 ```
+
+Consequences: the core is called with keyword arguments, so **`core/` parameter names must match
+the CLI's**; and only a failure to import the core module falls back to the container, so **keep
+heavy imports at module scope in `core/`** — an import deferred into a function body raises
+instead of falling back. Path types (`File`/`Directory`/`MS`/`URI`) are imported from `hip_cargo`.
 
 Every command auto-grows two params via `generate-function`, both marked `StimelaMeta(skip=True)`
 so they appear in the Python CLI but **not** the cab YAML:
@@ -69,6 +75,8 @@ so they appear in the Python CLI but **not** the cab YAML:
 
 Path-typed params (`File`/`Directory`/`MS`/`URI`) accept local paths and remote URIs
 (`s3://`, `gs://`, `az://`); credentials are forwarded into the container by `run_in_container`.
+hip-cargo only makes the CLI *accept* a URI: before documenting remote support for a command,
+check that its `core/` uses the `UPath` it receives rather than `os.path`/`open()`.
 
 ## 5. Cab generation is automatic
 

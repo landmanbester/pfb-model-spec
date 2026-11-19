@@ -18,6 +18,7 @@ import shutil
 from glob import glob
 
 import numpy as np
+from astropy.io import fits
 
 from pfb_model_spec import __version__
 from pfb_model_spec.utils.fits import save_fits, set_wcs
@@ -41,8 +42,6 @@ def read_wsclean_model(from_fits: str) -> dict:
     Raises:
         ValueError: No matching images, or inconsistent geometry across bands.
     """
-    from astropy.io import fits  # deferred: keeps astropy off the import path of lightweight consumers
-
     images = sorted(glob(f"{from_fits}-[0-9][0-9][0-9][0-9]-model.fits"), key=os.path.getctime)
     if not images:
         raise ValueError(f"No images found matching {from_fits}-####-model.fits")
