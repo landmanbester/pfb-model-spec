@@ -77,6 +77,13 @@ the `pip` ecosystem would not update `uv.lock`). Bumps are grouped by update-typ
 (minor+patch batched, major individual). Review requests come from `CODEOWNERS`, not the deprecated
 Dependabot `reviewers` key.
 
+A monthly **`docker`** entry bumps the Dockerfile's base images. The image's uv is a named
+`FROM ghcr.io/astral-sh/uv:<tag> AS uv` stage because Dependabot only reads `FROM` lines (a
+`COPY --from=<image>` is never updated). Keep that uv no older than the one that writes `uv.lock`:
+`uv export --locked` re-checks the lock with it, and an old uv can reject a valid lock. Python
+minor/major bumps are ignored (the image's Python minor is chosen by hand). When a uv bump moves
+past the `uv_build` cap in `[build-system]` (`<0.14.0`), raise the cap.
+
 ## 5. Releases
 ```bash
 uv run tbump <version>      # e.g. uv run tbump 0.0.1

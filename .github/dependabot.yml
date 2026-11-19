@@ -36,3 +36,27 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # Docker base images: the uv build stage and python. Monthly: these are build
+  # tools, and an old uv in the image can reject a uv.lock written by a newer one
+  # (the Dockerfile runs `uv export --locked`). Python's minor version is the
+  # image's runtime and is chosen by hand; the -slim tag already floats patches.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps"
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      docker:
+        applies-to: version-updates
+        patterns:
+          - "*"

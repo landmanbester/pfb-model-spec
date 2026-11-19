@@ -1424,7 +1424,7 @@ wheels = [
 [[package]]
 name = "hip-cargo"
 version = "0.4.0"
-source = { git = "https://github.com/landmanbester/hip-cargo?branch=main#6aa584a09edf2e91e4933a6f494cd1c0eb0cc92c" }
+source = { git = "https://github.com/landmanbester/hip-cargo?branch=main#d5cea31bc862c12fe379f64783329e9541a0c05b" }
 dependencies = [
     { name = "fsspec" },
     { name = "libcst" },
