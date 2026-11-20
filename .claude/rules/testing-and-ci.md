@@ -17,7 +17,9 @@ release.
   CLI direction fails, regenerate the module from its cab — never hand-fix `cli/*.py`. It also checks
   two contracts: every CLI parameter is a parameter of `<cmd>_core` (the wrapper calls it with
   `**params`), and every cab command is registered in `cli/__init__.py`. If one fails, fix the
-  source, not the test.
+  source, not the test. A generated core import whose module or function no longer exists fails;
+  the signature check skips only a hand-written wrapper or a core function it cannot follow with
+  `ast` (re-exported, aliased or defined conditionally).
 - `tests/test_precommit.py` guards that the ruff `rev:` in `.pre-commit-config.yaml` equals the
   ruff in `uv.lock`; bump the hook when ruff moves in the lock.
 - Both template files set `pytestmark = pytest.mark.unit`. Mark new test files too: an unmarked file

@@ -148,7 +148,10 @@ def test_the_committed_cli_is_what_generate_function_emits(command: str, tmp_pat
 def _core_binding(command: str) -> tuple[set[str], ast.FunctionDef] | None:
     """The keys the wrapper passes as ``**params`` and the core function it calls.
 
-    None when the wrapper is not in the generated shape (a hand-written command).
+    None when the wrapper is not in the generated shape (a hand-written command),
+    or when the core function lives outside this package or is re-exported rather
+    than defined. Fails when the generated import points at a module or function
+    that does not exist: a stale import must not turn the check into a skip.
     """
     wrapper = _cab_function(CLI_DIR / f"{command}.py")
     if wrapper is None:
@@ -192,20 +195,44 @@ def _core_binding(command: str) -> tuple[set[str], ast.FunctionDef] | None:
     if keys is None or source is None:
         return None
     module, name = source
+    if module.split(".")[0] != CLI_DIR.parent.name:
+        return None
     core_file = REPO_ROOT / "src" / f"{module.replace('.', '/')}.py"
     if not core_file.is_file():
         core_file = core_file.with_suffix("") / "__init__.py"
     if not core_file.is_file():
+        pytest.fail(f"{command} imports {name} from {module}, which does not exist")
+    bindings = _module_bindings(ast.parse(core_file.read_text()), name)
+    if not bindings:
+        pytest.fail(f"{command} imports {name} from {module}, which does not define it")
+    core = bindings[0]
+    # A re-export, an alias or a conditional definition cannot be followed with ast.
+    if len(bindings) > 1 or not isinstance(core, ast.FunctionDef):
         return None
-    core = next(
-        (
-            node
-            for node in ast.parse(core_file.read_text()).body
-            if isinstance(node, ast.FunctionDef) and node.name == name
-        ),
-        None,
-    )
-    return (keys, core) if core is not None else None
+    return keys, core
+
+
+def _module_bindings(tree: ast.Module, name: str) -> list[ast.stmt]:
+    """Module-scope statements that bind ``name``, including inside ``if``/``try``/``with`` blocks."""
+    found = []
+    pending = list(tree.body)
+    while pending:
+        node = pending.pop(0)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == name:
+                found.append(node)
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any((alias.asname or alias.name.split(".")[0]) == name for alias in node.names):
+                found.append(node)
+            continue
+        # A bare annotation (`run: Callable`) binds nothing at run time.
+        targets = [node.target] if isinstance(node, ast.AnnAssign) and node.value else getattr(node, "targets", [])
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            found.append(node)
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            pending.extend(getattr(node, field, []))
+    return found
 
 
 @pytest.mark.parametrize("command", COMMANDS)
