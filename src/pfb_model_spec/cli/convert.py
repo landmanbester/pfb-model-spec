@@ -86,9 +86,11 @@ def convert(
 
             # Pre-flight must_exist for remote URIs before dispatching.
             preflight_remote_must_exist(convert, params)
-        except ImportError:
-            if backend == "native":
+        except ImportError as exc:
+            # A failed import from this package is a bug, not a missing install.
+            if backend == "native" or (exc.name or "").split(".")[0] == "pfb_model_spec":
                 raise
+            typer.echo(f"Cannot run natively ({exc!r}); falling back to a container.", err=True)
         else:
             convert_core(**params)
             return
