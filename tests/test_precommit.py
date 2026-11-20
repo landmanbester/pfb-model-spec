@@ -10,7 +10,10 @@ CI disagree. When ruff moves in uv.lock, bump the hook's `rev` to `v<version>`.
 import re
 from pathlib import Path
 
+import pytest
 import yaml
+
+pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUFF_PRE_COMMIT = "https://github.com/astral-sh/ruff-pre-commit"
