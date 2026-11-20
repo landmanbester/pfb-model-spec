@@ -52,9 +52,11 @@ def my_command(...):
             from hip_cargo.utils.runner import preflight_remote_must_exist
             from pfb_model_spec.core.my_command import my_command as my_command_core
             preflight_remote_must_exist(my_command, params)
-        except ImportError:
-            if backend == "native":
+        except ImportError as exc:
+            # a failed import from this package is a bug, not a missing install
+            if backend == "native" or (exc.name or "").split(".")[0] == "pfb_model_spec":
                 raise
+            typer.echo(f"Cannot run natively ({exc!r}); falling back to a container.", err=True)
         else:
             my_command_core(**params); return  # an ImportError raised here propagates
     # heavy deps missing OR a container backend was chosen → run in container
@@ -63,10 +65,20 @@ def my_command(...):
     run_in_container(my_command, params, image=get_container_image("pfb-model-spec"), backend=backend, ...)
 ```
 
-Consequences: the core is called with keyword arguments, so **`core/` parameter names must match
-the CLI's**; and only a failure to import the core module falls back to the container, so **keep
-heavy imports at module scope in `core/`** — an import deferred into a function body raises
-instead of falling back. Path types (`File`/`Directory`/`MS`/`URI`) are imported from `hip_cargo`.
+Only the imports and the pre-flight sit inside the `try`. An `ImportError` whose module lies in
+`pfb_model_spec` itself (a renamed symbol, a deleted module) is re-raised as a bug; any other one is
+printed to stderr before an `auto` fallback, so an unexpected container run can be diagnosed.
+Consequences:
+
+- **Core parameter names must match the CLI's**: the core is called with `**params`
+  (`tests/test_roundtrip.py` checks this).
+- **Keep heavy imports at module scope in `core/`**: only a failure to import the core module falls
+  back to the container. An import deferred into a function body fails the run instead.
+- **An `ImportError` meant to request the container** (e.g. an environment check) must be raised
+  while `core/<cmd>.py` is imported, at module scope, with its `name` unset. One raised during the
+  run propagates by design. `core/` raises none today.
+
+Path types (`File`/`Directory`/`MS`/`URI`) are imported from `hip_cargo`.
 
 Every command auto-grows two params via `generate-function`, both marked `StimelaMeta(skip=True)`
 so they appear in the Python CLI but **not** the cab YAML:
@@ -84,8 +96,8 @@ check that its `core/` uses the `UPath` it receives rather than `os.path`/`open(
 keep them in sync with `cli/*.py`:
 
 1. **Pre-commit hook** (`generate-cabs`): regenerates cabs on every commit. If it modifies a file
-   the commit "fails" — re-stage and re-commit. **It uses `language: system`, so it runs `hip-cargo`
-   from the *active* venv** — see `testing-and-ci.md` → "Committing" for why this matters.
+   the commit "fails" — re-stage and re-commit. It runs `uv run --no-sync hip-cargo …`, i.e. the
+   hip-cargo locked in `uv.lock` from the project `.venv` — see `testing-and-ci.md` → "Committing".
 2. **`update-cabs.yml`** workflow: on merge to `main`, resets the image tag to `latest`,
    regenerates cabs, and pushes a `[skip checks]` commit.
 3. **`tbump`**: on release, sets the image tag to the version and regenerates cabs.

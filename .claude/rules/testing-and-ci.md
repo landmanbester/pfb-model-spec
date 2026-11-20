@@ -14,9 +14,14 @@ release.
 - `tests/test_roundtrip.py` (hip-cargo's template) discovers every `cli/<cmd>.py` and checks both
   directions: the committed cab is what `generate-cabs` emits, and the committed CLI is what
   `generate-function` emits from that cab, byte for byte. New commands need no change here. If the
-  CLI direction fails, regenerate the module from its cab — never hand-fix `cli/*.py`.
+  CLI direction fails, regenerate the module from its cab — never hand-fix `cli/*.py`. It also checks
+  two contracts: every CLI parameter is a parameter of `<cmd>_core` (the wrapper calls it with
+  `**params`), and every cab command is registered in `cli/__init__.py`. If one fails, fix the
+  source, not the test.
 - `tests/test_precommit.py` guards that the ruff `rev:` in `.pre-commit-config.yaml` equals the
   ruff in `uv.lock`; bump the hook when ruff moves in the lock.
+- Both template files set `pytestmark = pytest.mark.unit`. Mark new test files too: an unmarked file
+  is silently deselected by `pytest -m unit`.
 - `tests/test_spec.py` guards that `SPEC_VERSION` is not behind the package `major.minor`.
 - `tests/_genesis.py` is a frozen fixture (the genesis writer) and must never be updated to follow
   the library.
@@ -24,14 +29,14 @@ release.
   `modelspec` (keeps the lightweight install intact).
 
 ## 2. Committing (read before you commit)
-- **Run `git commit` with the project venv active**, inline, in the same shell:
-  ```bash
-  source /path/to/pfb-model-spec/.venv/bin/activate && git add <files> && git commit -m "..."
-  ```
-  Why: the `generate-cabs` pre-commit hook uses `language: system`, so it runs whatever `hip-cargo`
-  is on `PATH`. If the wrong venv is active (e.g. a sibling project's), `get_container_image` can't
-  resolve and the hook **silently strips the `image:` line** from `cabs/model2comps.yml`, failing the
-  commit. `uv run …` is not enough for commits because the git hook runs in the ambient shell.
+- **Keep the project `.venv` synced** (`uv sync --extra full --group test`) before committing. The
+  `generate-cabs` hook (and tbump's cab step) run `uv run --no-sync hip-cargo …`, so they use the
+  hip-cargo locked in `uv.lock` from the project `.venv`, whichever venv is active. `--no-sync`
+  never installs anything, so a missing or stale `.venv` fails the hook rather than being fixed by
+  it. (A bare `hip-cargo` from `PATH` could come from a sibling project's venv, which cannot
+  resolve the image and silently strips the `image:` line from a cab.)
+- `default_stages: [pre-commit]` makes each hook run once per commit; the commit-msg stage runs only
+  the conventional-commit hook.
 - **Commit messages must be Conventional Commits.** A `commit-msg` hook (`conventional-pre-commit`)
   enforces it. Allowed types: `feat fix refactor perf docs deps chore ci style test build`.
   After cloning, run `pre-commit install` once — `default_install_hook_types` wires up both the
@@ -40,7 +45,12 @@ release.
   `chore(release):` prefix for ordinary work (it's skipped from the changelog).
 
 ## 3. GitHub workflows
-- **`ci.yml`** — `quality` job (ruff, lint-only), a `test` matrix and a `lightweight` job. The
+- **`ci.yml`** — runs on **pull requests only** (into `main` or a long-lived `dev-*` integration
+  branch) plus `workflow_dispatch`; there is no `push` trigger, since a merge is the merge of a PR
+  that already passed. A PR into any other branch (e.g. a stacked PR) runs only on demand:
+  `gh workflow run ci.yml --ref <branch>`. Do not add a `push` trigger back. A PR is tested against
+  its base as of the run, so the ruleset requires branches to be up to date before merging.
+  Jobs: `quality` (ruff, lint-only), a `test` matrix and a `lightweight` job. The
   full suite runs on the oldest and newest Python the `full` extra supports (`Tests (3.11)`,
   `Tests (3.14)`) plus `Tests (3.14, arm64)`; `UV_PYTHON` comes from the matrix (otherwise uv
   follows `.python-version`). It installs with `uv sync --extra full --group test` and runs
@@ -48,9 +58,12 @@ release.
   **Python 3.10 is lightweight-only**: `Lightweight install (3.10)` installs without extras and runs
   `pfbspec --help`, which imports every `cli/` module; its Python must equal the `requires-python`
   floor. These job names are the required checks on `main` — renaming a job means updating the
-  ruleset. Honors a `[skip checks]` commit tag.
-- **`publish.yml`** — on `v*` tags: lint + `uv build` + PyPI trusted publishing (environment `pypi`).
-  Does **not** run tests (they run in `ci.yml`).
+  ruleset. Until hip-cargo 0.5.0 is on PyPI, `Lightweight install (3.10)` does not check the
+  hip-cargo floor: `uv pip install .` honours the git source in `[tool.uv.sources]`.
+- **`publish.yml`** — on `v*` tags: lint + a `test` job + `uv build` + PyPI trusted publishing
+  (environment `pypi`); `publish` needs both `quality` and `test`. The tbump release commit never
+  goes through a PR, so this is the only CI run that sees it. The `test` job's Python (`UV_PYTHON`
+  and `setup-python`, `3.14`) must equal the newest Python in the `ci.yml` matrix.
 - **`publish-container.yml`** — builds/pushes the image to GHCR on `v*` tags and pushes to `main`
   only, never on PRs. The image is multi-arch: amd64 and arm64 build on native runners and push by
   digest, and a `merge` job tags one manifest (failing if an architecture is missing). A shared
@@ -69,7 +82,8 @@ release.
   `license-files = ["LICENSE"]` (newer `uv_build` errors if the license glob matches nothing in the
   build context).
 - **`update-cabs.yml`** — on push to `main`, resets the image tag to `latest`, regenerates cabs, and
-  pushes a `[skip checks]` commit. Requires the `APP_CLIENT_ID`/`APP_PRIVATE_KEY` GitHub App secrets.
+  pushes a commit tagged `[skip checks]`, which stops this workflow re-triggering on its own push
+  (`ci.yml` no longer reads the tag). Requires the `APP_CLIENT_ID`/`APP_PRIVATE_KEY` GitHub App secrets.
 
 ## 4. Dependencies (Dependabot)
 `.github/dependabot.yml` uses the **`uv` ecosystem** (keeps `pyproject.toml` + `uv.lock` in sync;
